@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 
+from collections import deque
 from collections.abc import Awaitable, Callable
 
 from dataclasses import dataclass
@@ -94,6 +95,9 @@ class AcaiaScale:
         self._device_state: AcaiaDeviceState | None = None
         self._weight: float | None = None
 
+        # flow rate
+        self.weight_history = deque(maxlen=20)  # Limit to 20 entries
+
         # queue
         self._queue: asyncio.Queue = asyncio.Queue()
         self._add_to_queue_lock = asyncio.Lock()
@@ -138,6 +142,45 @@ class AcaiaScale:
             return 0
 
         return int(self._timer_stop - self._timer_start)
+    
+    @property
+    def flow_rate(self) -> float:
+
+        if len(self.weight_history) < 4:
+            return None
+
+        now = time.time()
+        flows = []
+
+        # Calculate flow rates using 3 readings ago
+        for i in range(3, len(self.weight_history)):
+            prev_time, prev_weight = self.weight_history[i - 3]
+            curr_time, curr_weight = self.weight_history[i]
+
+            time_diff = curr_time - prev_time
+            weight_diff = curr_weight - prev_weight
+
+            # Ignore weights older than 5 seconds
+            if now - prev_time > 5:
+                continue
+
+            # Validate weight difference and flow rate limits
+            flow = weight_diff / time_diff
+            if flow <= 20.0:  # Flow rate limit
+                flows.append(flow)
+
+        if not flows:
+            return None
+
+        # Compute the Exponential Moving Average (EMA)
+        alpha = 2 / (len(flows) + 1)  # EMA weighting factor
+        ema = flows[0]  # Initialize EMA with the first flow rate
+
+        for flow in flows[1:]:
+            ema = alpha * flow + (1 - alpha) * ema
+
+        _LOGGER.debug("Flow rate: %.2f g/s", ema)
+        return ema
 
     def device_disconnected_handler(
         self,
@@ -438,6 +481,16 @@ class AcaiaScale:
 
         elif isinstance(msg, Message):
             self._weight = msg.value
+            timestamp = time.time()
+
+            # Check if weight is increasing before appending
+            if not self.weight_history or msg.value > self.weight_history[-1][1]:
+                self.weight_history.append((timestamp, msg.value)) 
+            elif msg.value < self.weight_history[-1][1] - 1: 
+                # Clear history if weight decreases (1gr margin error)
+                self.weight_history.clear()
+                self.weight_history.append((timestamp, msg.value))
+
             if msg.timer_running is not None:
                 self.timer_running = msg.timer_running
             _LOGGER.debug("Got weight %s", str(msg.value))
