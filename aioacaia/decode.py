@@ -58,25 +58,53 @@ class Message:
                 self.button = "start"
                 self.timer_running = True
                 self.value = self._decode_weight(payload[2:])
-                _LOGGER.debug("start (weight: %s)", self.value)
+                _LOGGER.debug("Timer started. Weight: %s", self.value)
+            elif payload[0] == 8 and payload[1] == 11:
+                self.button = "start"
+                self.timer_running = True
+                _LOGGER.debug("Timer started")
             elif payload[0] == 10 and payload[1] == 7:
                 self.button = "stop"
                 self.timer_running = False
                 self.time = self._decode_time(payload[2:])
                 self.value = self._decode_weight(payload[6:])
-                _LOGGER.debug("stop time: %s, weight: %s", self.time, self.value)
-            elif payload[0] == 10 and payload[1] == 5:  # stop for new scale
+                _LOGGER.debug(
+                    "Timer stopped. Time: %s, weight: %s",
+                    self.time,
+                    self.value,
+                )
+            elif payload[0] == 10 and payload[1] == 5:
                 self.button = "stop"
                 self.timer_running = False
+                self.time = self._decode_time(payload[2:])
+                _LOGGER.debug("Timer stopped. Time: %s", self.time)
+            elif payload[0] == 10 and payload[1] == 13:
+                self.button = "stop"
+                self.timer_running = False
+                _LOGGER.debug("Timer stopped")
             elif payload[0] == 9 and payload[1] == 7:
                 self.button = "reset"
                 self.time = self._decode_time(payload[2:])
                 self.value = self._decode_weight(payload[6:])
-                _LOGGER.debug("reset time: %s, weight: %s", self.time, self.value)
+                _LOGGER.debug(
+                    "Timer reset. Time: %s, weight: %s", self.time, self.value
+                )
+            elif payload[0] == 9 and payload[1] == 5:
+                self.button = "reset"
+                self.time = self._decode_time(payload[2:])
+                _LOGGER.debug("reset time: %s", self.time)
+
+            elif payload[0] == 9 and payload[1] == 12:
+                self.button = "reset"
+                _LOGGER.debug("Timer reset")
             else:
                 self.button = "unknownbutton"
-                _LOGGER.debug("unknownbutton %s", str(payload))
-
+                _LOGGER.debug(
+                    "Uknown Button: %s,%s. Full payload: %s",
+                    payload[0],
+                    payload[1],
+                    str(payload),
+                )
         else:
             raise AcaiaMessageError(bytearray(payload), "Unknown message type")
 
