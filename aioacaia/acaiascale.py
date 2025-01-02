@@ -86,6 +86,7 @@ class AcaiaScale:
         self.timer_running = False
         self._timer_start: float | None = None
         self._timer_stop: float | None = None
+        self._button_pressed = False
 
         # connection diagnostics
         self.connected = False
@@ -406,7 +407,9 @@ class AcaiaScale:
                     (self._default_char_id, self._msg_types["startTimer"])
                 )
             self.timer_running = True
-            if not self._timer_start:
+            if self._timer_start is not None and self._timer_stop is not None:
+                self._timer_start = time.time() - (self._timer_stop - self._timer_start)
+            else:
                 self._timer_start = time.time()
         else:
             _LOGGER.debug('Sending "stop" message.')
@@ -497,6 +500,37 @@ class AcaiaScale:
             # Remove old readings (more than 5 seconds)
             while self.weight_history and (timestamp - self.weight_history[0][0] > 5):
                 self.weight_history.popleft()
+
+            # handle physical button presses
+            def reset() -> None:
+                """Physically reset the timer."""
+                self._timer_start = None
+                self._timer_stop = None
+                self.timer_running = False
+                self._button_pressed = False
+
+            def reset_on_power_button() -> None:
+                """Pressing the power button two consecutive times resets the timer."""
+                if self._button_pressed:
+                    reset()
+                else:
+                    self._button_pressed = True
+
+            if msg.button == "start":
+                self.timer_running = True
+                if self._timer_start is not None and self._timer_stop is not None:
+                    self._timer_start = time.time() - (
+                        self._timer_stop - self._timer_start
+                    )
+                else:
+                    self._timer_start = time.time()
+                reset_on_power_button()
+            elif msg.button == "stop":
+                self.timer_running = False
+                self._timer_stop = time.time()
+                reset_on_power_button()
+            elif msg.button == "reset":
+                reset()
 
             if msg.timer_running is not None:
                 self.timer_running = msg.timer_running
