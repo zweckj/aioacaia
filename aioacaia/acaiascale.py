@@ -21,6 +21,7 @@ from .const import (
     HEARTBEAT_INTERVAL,
     NOTIFY_CHAR_ID,
     OLD_STYLE_CHAR_ID,
+    AcaiaButton,
 )
 from .exceptions import (
     AcaiaDeviceNotFound,
@@ -31,7 +32,12 @@ from .exceptions import (
 )
 from .const import UnitMass
 from .decode import Message, Settings, decode
-from .helpers import encode, encode_id, encode_notification_request, derive_model_name
+from .helpers import (
+    encode,
+    encode_id,
+    encode_notification_request,
+    derive_model_name,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -203,7 +209,11 @@ class AcaiaScale:
         if self._client is None:
             raise AcaiaError("Client not initialized")
         try:
-            await self._client.write_gatt_char(char_id, payload)
+            await self._client.write_gatt_char(
+                char_specifier=char_id,
+                data=payload,
+                response=True,
+            )
             self._timestamp_last_command = time.time()
         except BleakDeviceNotFoundError as ex:
             self.connected = False
@@ -516,7 +526,7 @@ class AcaiaScale:
                 else:
                     self._button_pressed = True
 
-            if msg.button == "start":
+            if msg.button is AcaiaButton.START:
                 self.timer_running = True
                 if self._timer_start is not None and self._timer_stop is not None:
                     self._timer_start = time.time() - (
@@ -525,11 +535,11 @@ class AcaiaScale:
                 else:
                     self._timer_start = time.time()
                 reset_on_power_button()
-            elif msg.button == "stop":
+            elif msg.button is AcaiaButton.STOP:
                 self.timer_running = False
                 self._timer_stop = time.time()
                 reset_on_power_button()
-            elif msg.button == "reset":
+            elif msg.button is AcaiaButton.RESET:
                 reset()
 
             if msg.timer_running is not None:

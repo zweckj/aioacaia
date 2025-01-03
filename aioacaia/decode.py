@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from bleak import BleakGATTCharacteristic
 
-from .const import HEADER1, HEADER2
+from .const import HEADER1, HEADER2, AcaiaButton
 from .exceptions import AcaiaMessageError, AcaiaMessageTooLong, AcaiaMessageTooShort
 
 _LOGGER = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ class Message:
         self.msg_type = msg_type
         self.payload = payload
         self.value: float | None = None
-        self.button: str | None = None
+        self.button: AcaiaButton | None = None
         self.time: int | None = None
         self.timer_running: bool | None = None
 
@@ -51,20 +51,20 @@ class Message:
         # button message
         elif self.msg_type == 8:
             if payload[0] == 0 and payload[1] == 5:
-                self.button = "tare"
+                self.button = AcaiaButton.TARE
                 self.value = self._decode_weight(payload[2:])
                 _LOGGER.debug("tare (weight: %s)", self.value)
             elif payload[0] == 8 and payload[1] == 5:
-                self.button = "start"
+                self.button = AcaiaButton.START
                 self.timer_running = True
                 self.value = self._decode_weight(payload[2:])
                 _LOGGER.debug("Timer started. Weight: %s", self.value)
             elif payload[0] == 8 and payload[1] == 11:
-                self.button = "start"
+                self.button = AcaiaButton.START
                 self.timer_running = True
                 _LOGGER.debug("Timer started")
             elif payload[0] == 10 and payload[1] == 7:
-                self.button = "stop"
+                self.button = AcaiaButton.STOP
                 self.timer_running = False
                 self.time = self._decode_time(payload[2:])
                 self.value = self._decode_weight(payload[6:])
@@ -74,31 +74,31 @@ class Message:
                     self.value,
                 )
             elif payload[0] == 10 and payload[1] == 5:
-                self.button = "stop"
+                self.button = AcaiaButton.STOP
                 self.timer_running = False
                 self.time = self._decode_time(payload[2:])
                 _LOGGER.debug("Timer stopped. Time: %s", self.time)
             elif payload[0] == 10 and payload[1] == 13:
-                self.button = "stop"
+                self.button = AcaiaButton.STOP
                 self.timer_running = False
                 _LOGGER.debug("Timer stopped")
             elif payload[0] == 9 and payload[1] == 7:
-                self.button = "reset"
+                self.button = AcaiaButton.RESET
                 self.time = self._decode_time(payload[2:])
                 self.value = self._decode_weight(payload[6:])
                 _LOGGER.debug(
                     "Timer reset. Time: %s, weight: %s", self.time, self.value
                 )
             elif payload[0] == 9 and payload[1] == 5:
-                self.button = "reset"
+                self.button = AcaiaButton.RESET
                 self.time = self._decode_time(payload[2:])
                 _LOGGER.debug("reset time: %s", self.time)
 
             elif payload[0] == 9 and payload[1] == 12:
-                self.button = "reset"
+                self.button = AcaiaButton.RESET
                 _LOGGER.debug("Timer reset")
             else:
-                self.button = "unknownbutton"
+                self.button = AcaiaButton.UNKNOWN
                 _LOGGER.debug(
                     "Uknown Button: %s,%s. Full payload: %s",
                     payload[0],

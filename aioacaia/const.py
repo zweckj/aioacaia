@@ -17,3 +17,13 @@ class UnitMass(StrEnum):
 
     GRAMS = "grams"
     OUNCES = "ounces"
+
+
+class AcaiaButton(StrEnum):
+    """Acaia Button."""
+
+    START = "start"
+    STOP = "stop"
+    RESET = "reset"
+    TARE = "tare"
+    UNKNOWN = "unknownbutton"
