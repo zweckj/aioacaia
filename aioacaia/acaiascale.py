@@ -458,7 +458,9 @@ class AcaiaScale:
         try:
             msg, _ = decode(data)
         except AcaiaMessageTooShort as ex:
-            if ex.bytes_recvd[0] != HEADER1 or ex.bytes_recvd[1] != HEADER2:
+            if len(ex.bytes_recvd) < 2:
+                _LOGGER.debug("Received one byte message: %s", ex.bytes_recvd)
+            elif ex.bytes_recvd[0] != HEADER1 or ex.bytes_recvd[1] != HEADER2:
                 _LOGGER.debug("Non-header message too short: %s", ex.bytes_recvd)
             else:
                 self._last_short_msg = ex.bytes_recvd
