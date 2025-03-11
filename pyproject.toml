@@ -1,6 +1,6 @@
 [project]
 name = "aioacaia"
-version = "0.1.15"
+version = "0.1.16"
 license = { text = "GPL-3.0-only" }
 description = "An async implementation of PyAcaia"
 readme = "README.md"
