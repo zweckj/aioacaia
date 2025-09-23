@@ -5,14 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-
 from collections import deque
 from collections.abc import Awaitable, Callable
-
 from dataclasses import dataclass
 
-from bleak import BleakClient, BleakGATTCharacteristic, BLEDevice
+from bleak import BleakClient, BleakGATTCharacteristic, BleakScanner, BLEDevice
 from bleak.exc import BleakDeviceNotFoundError, BleakError
+from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
 from .const import (
     DEFAULT_CHAR_ID,
@@ -21,7 +20,9 @@ from .const import (
     HEARTBEAT_INTERVAL,
     NOTIFY_CHAR_ID,
     OLD_STYLE_CHAR_ID,
+    UnitMass,
 )
+from .decode import Message, Settings, decode
 from .exceptions import (
     AcaiaDeviceNotFound,
     AcaiaError,
@@ -29,9 +30,7 @@ from .exceptions import (
     AcaiaMessageTooLong,
     AcaiaMessageTooShort,
 )
-from .const import UnitMass
-from .decode import Message, Settings, decode
-from .helpers import encode, encode_id, encode_notification_request, derive_model_name
+from .helpers import derive_model_name, encode, encode_id, encode_notification_request
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,11 +67,13 @@ class AcaiaScale:
         name: str | None = None,
         is_new_style_scale: bool = True,
         notify_callback: Callable[[], None] | None = None,
+        scanner: BleakScanner | None = None,
     ) -> None:
         """Initialize the scale."""
 
         self._is_new_style_scale = is_new_style_scale
         self._client: BleakClient | None = None
+        self._scanner = scanner
 
         self.address_or_ble_device = address_or_ble_device
         self.model = derive_model_name(name)
@@ -271,13 +272,26 @@ class AcaiaScale:
             )
             return
 
-        self._client = BleakClient(
-            address_or_ble_device=self.address_or_ble_device,
-            disconnected_callback=self.device_disconnected_handler,
-        )
+        if isinstance(self.address_or_ble_device, str):
+            if not self._scanner:
+                self._scanner = BleakScanner()
+            device = await self._scanner.find_device_by_address(
+                self.address_or_ble_device
+            )
+            if not device:
+                raise AcaiaDeviceNotFound(
+                    f"Device with address {self.address_or_ble_device} not found"
+                )
+            self.address_or_ble_device = device
 
         try:
-            await self._client.connect()
+            self._client = await establish_connection(
+                BleakClientWithServiceCache,
+                self.address_or_ble_device,
+                self.address_or_ble_device.name or "Unknown",
+                max_attempts=3,
+                disconnected_callback=self.device_disconnected_handler,
+            )
         except BleakError as ex:
             msg = "Error during connecting to device"
             _LOGGER.debug("%s: %s", msg, ex)
