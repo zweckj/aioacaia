@@ -5,16 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-
 from collections import deque
 from collections.abc import Awaitable, Callable
-
 from dataclasses import dataclass
 
-from bleak import BleakClient, BleakGATTCharacteristic, BLEDevice
+from bleak import BleakClient, BleakGATTCharacteristic, BleakScanner, BLEDevice
 from bleak.exc import BleakDeviceNotFoundError, BleakError
-from bleak import BleakScanner
-from bleak_retry_connector import establish_connection, BleakClientWithServiceCache
+from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
 from .const import (
     DEFAULT_CHAR_ID,
@@ -23,7 +20,9 @@ from .const import (
     HEARTBEAT_INTERVAL,
     NOTIFY_CHAR_ID,
     OLD_STYLE_CHAR_ID,
+    UnitMass,
 )
+from .decode import Message, Settings, decode
 from .exceptions import (
     AcaiaDeviceNotFound,
     AcaiaError,
@@ -31,9 +30,7 @@ from .exceptions import (
     AcaiaMessageTooLong,
     AcaiaMessageTooShort,
 )
-from .const import UnitMass
-from .decode import Message, Settings, decode
-from .helpers import encode, encode_id, encode_notification_request, derive_model_name
+from .helpers import derive_model_name, encode, encode_id, encode_notification_request
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -278,7 +275,9 @@ class AcaiaScale:
         if isinstance(self.address_or_ble_device, str):
             if not self._scanner:
                 self._scanner = BleakScanner()
-            device = await self._scanner.find_device_by_address(self.address_or_ble_device)
+            device = await self._scanner.find_device_by_address(
+                self.address_or_ble_device
+            )
             if not device:
                 raise AcaiaDeviceNotFound(
                     f"Device with address {self.address_or_ble_device} not found"
