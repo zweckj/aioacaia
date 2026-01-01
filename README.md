@@ -1,6 +1,6 @@
 # aioacaia
 
-Async implementation of [pyacaia](https://github.com/lucapinello/pyacaia/tree/master/pyacaia), based on `asyncio` and `bleak`
+Async implementation of [pyacaia](https://github.com/lucapinello/pyacaia), based on `asyncio` and `bleak`
 
 # Usage
 
