@@ -9,7 +9,9 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from bleak import BleakClient, BleakGATTCharacteristic, BleakScanner, BLEDevice
+from bleak import BleakClient, BleakScanner
+from bleak.backends.characteristic import BleakGATTCharacteristic
+from bleak.backends.device import BLEDevice
 from bleak.exc import BleakDeviceNotFoundError, BleakError
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
@@ -22,7 +24,8 @@ from .const import (
     OLD_STYLE_CHAR_ID,
     UnitMass,
 )
-from .decode import Message, Settings, decode
+from .discovery import derive_model_name
+from .encoder import encode, encode_id, encode_notification_request
 from .exceptions import (
     AcaiaDeviceNotFound,
     AcaiaError,
@@ -30,12 +33,19 @@ from .exceptions import (
     AcaiaMessageTooLong,
     AcaiaMessageTooShort,
 )
-from .helpers import derive_model_name, encode, encode_id, encode_notification_request
+from .messages import (
+    ButtonMessage,
+    ButtonType,
+    Settings,
+    TimerMessage,
+    WeightMessage,
+)
+from .parser import decode
 
 _LOGGER = logging.getLogger(__name__)
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, slots=True)
 class AcaiaDeviceState:
     """Data class for acaia scale info data."""
 
@@ -80,8 +90,8 @@ class AcaiaScale:
         self.name = name
 
         # tasks
-        self.heartbeat_task: asyncio.Task | None = None
-        self.process_queue_task: asyncio.Task | None = None
+        self.heartbeat_task: asyncio.Task[None] | None = None
+        self.process_queue_task: asyncio.Task[None] | None = None
 
         # timer related
         self.timer_running = False
@@ -103,11 +113,12 @@ class AcaiaScale:
         )  # Limit to 20 entries
 
         # queue
-        self._queue: asyncio.Queue = asyncio.Queue()
+        self._queue: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue(maxsize=100)
         self._add_to_queue_lock = asyncio.Lock()
 
         self._last_short_msg: bytearray | None = None
 
+        self._msg_types = self._msg_types.copy()
         self._msg_types["auth"] = encode_id(is_pyxis_style=is_new_style_scale)
 
         if not is_new_style_scale:
@@ -141,7 +152,7 @@ class AcaiaScale:
         if self._timer_start is None:
             return 0
         if self.timer_running:
-            return int(time.time() - self._timer_start)
+            return int(time.monotonic() - self._timer_start)
         if self._timer_stop is None:
             return 0
 
@@ -164,8 +175,10 @@ class AcaiaScale:
             weight_diff = curr_weight - prev_weight
 
             # Validate weight difference and flow rate limits
+            if time_diff <= 0:
+                continue
             flow = weight_diff / time_diff
-            if flow <= 20.0:  # Flow rate limit
+            if 0 <= flow <= 20.0:  # Flow rate limit
                 flows.append(flow)
 
         if not flows:
@@ -194,12 +207,14 @@ class AcaiaScale:
         )
         self.timer_running = False
         self.connected = False
+        self._client = None
         self.last_disconnect_time = time.time()
-        self.async_empty_queue_and_cancel_tasks()
+        self._cancel_background_tasks()
+        self._drain_queue()
         if notify and self._notify_callback:
             self._notify_callback()
 
-    async def _write_msg(self, char_id: str, payload: bytearray) -> None:
+    async def _write_msg(self, char_id: str, payload: bytes) -> None:
         """wrapper for writing to the device."""
         if self._client is None:
             raise AcaiaError("Client not initialized")
@@ -219,30 +234,49 @@ class AcaiaScale:
             self.connected = False
             raise AcaiaError("Unknown error writing to device") from ex
 
-    def async_empty_queue_and_cancel_tasks(self) -> None:
-        """Empty the queue."""
-
-        while not self._queue.empty():
-            self._queue.get_nowait()
+    def _drain_queue(self) -> None:
+        """Discard and acknowledge all queued commands."""
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
             self._queue.task_done()
 
-        if self.heartbeat_task and not self.heartbeat_task.done():
-            self.heartbeat_task.cancel()
+    def _cancel_background_tasks(self) -> list[asyncio.Task[None]]:
+        """Cancel background tasks other than the calling task."""
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
 
-        if self.process_queue_task and not self.process_queue_task.done():
-            self.process_queue_task.cancel()
+        tasks = []
+        for task in (self.heartbeat_task, self.process_queue_task):
+            if task and task is not current_task and not task.done():
+                task.cancel()
+                tasks.append(task)
+        return tasks
+
+    async def _disconnect_client(self) -> None:
+        """Disconnect and clear the current BLE client."""
+        client = self._client
+        self._client = None
+        if client is None:
+            return
+        try:
+            await client.disconnect()
+        except BleakError as ex:
+            _LOGGER.debug("Error disconnecting from device: %s", ex)
 
     async def process_queue(self) -> None:
         """Task to process the queue in the background."""
-        while True:
+        while self.connected:
             try:
-                if not self.connected:
-                    self.async_empty_queue_and_cancel_tasks()
-                    return
-
                 char_id, payload = await self._queue.get()
-                await self._write_msg(char_id, payload)
-                self._queue.task_done()
+                try:
+                    await self._write_msg(char_id, payload)
+                finally:
+                    self._queue.task_done()
                 await asyncio.sleep(0.1)
 
             except asyncio.CancelledError:
@@ -250,6 +284,9 @@ class AcaiaScale:
                 return
             except (AcaiaDeviceNotFound, AcaiaError) as ex:
                 self.connected = False
+                self._cancel_background_tasks()
+                self._drain_queue()
+                await self._disconnect_client()
                 _LOGGER.debug("Error writing to device: %s", ex)
                 return
 
@@ -266,11 +303,16 @@ class AcaiaScale:
         if self.connected:
             return
 
-        if self.last_disconnect_time and self.last_disconnect_time > (time.time() - 15):
+        if self.last_disconnect_time:
+            reconnect_delay = 15 - (time.time() - self.last_disconnect_time)
+        else:
+            reconnect_delay = 0
+        if reconnect_delay > 0:
             _LOGGER.debug(
-                "Scale has recently been disconnected, waiting 15 seconds before reconnecting"
+                "Scale has recently been disconnected, waiting %.1f seconds before reconnecting",
+                reconnect_delay,
             )
-            return
+            await asyncio.sleep(reconnect_delay)
 
         if isinstance(self.address_or_ble_device, str):
             if not self._scanner:
@@ -285,13 +327,15 @@ class AcaiaScale:
             self.address_or_ble_device = device
 
         try:
-            self._client = await establish_connection(
+            client = await establish_connection(
                 BleakClientWithServiceCache,
                 self.address_or_ble_device,
                 self.address_or_ble_device.name or "Unknown",
                 max_attempts=3,
                 disconnected_callback=self.device_disconnected_handler,
             )
+        except BleakDeviceNotFoundError as ex:
+            raise AcaiaDeviceNotFound("Device not found") from ex
         except BleakError as ex:
             msg = "Error during connecting to device"
             _LOGGER.debug("%s: %s", msg, ex)
@@ -305,32 +349,38 @@ class AcaiaScale:
             _LOGGER.debug("%s: %s", msg, ex)
             raise AcaiaError(msg) from ex
 
-        self.connected = True
-        _LOGGER.debug("Connected to Acaia scale")
-
+        self._client = client
         if callback is None:
             callback = self.on_bluetooth_data_received
         try:
-            await self._client.start_notify(
+            await client.start_notify(
                 char_specifier=self._notify_char_id,
-                callback=(
-                    self.on_bluetooth_data_received if callback is None else callback
-                ),
+                callback=callback,
             )
             await asyncio.sleep(0.1)
-        except BleakError as ex:
-            msg = "Error subscribing to notifications"
-            _LOGGER.debug("%s: %s", msg, ex)
-            raise AcaiaError(msg) from ex
-
-        try:
-            await self.auth()
-            if callback is not None:
-                await self.send_weight_notification_request()
+            await self._write_msg(self._default_char_id, self._msg_types["auth"])
+            await asyncio.sleep(0.1)
+            await self._write_msg(
+                self._default_char_id, self._msg_types["notificationRequest"]
+            )
+        except asyncio.CancelledError:
+            await self._disconnect_client()
+            raise
         except BleakDeviceNotFoundError as ex:
+            await self._disconnect_client()
             raise AcaiaDeviceNotFound("Device not found") from ex
+        except AcaiaError:
+            await self._disconnect_client()
+            raise
         except BleakError as ex:
-            raise AcaiaError("Error during authentication") from ex
+            await self._disconnect_client()
+            raise AcaiaError("Error setting up connection") from ex
+        except TimeoutError as ex:
+            await self._disconnect_client()
+            raise AcaiaError("Timeout setting up connection") from ex
+
+        self.connected = True
+        _LOGGER.debug("Connected to Acaia scale")
 
         if setup_tasks:
             self._setup_tasks()
@@ -381,25 +431,20 @@ class AcaiaScale:
             except asyncio.CancelledError:
                 self.connected = False
                 return
-            except asyncio.QueueFull as ex:
-                self.connected = False
-                _LOGGER.debug("Error sending heartbeat: %s", ex)
-                return
 
     async def disconnect(self) -> None:
         """Clean disconnect from the scale"""
 
         _LOGGER.debug("Disconnecting from scale")
         self.connected = False
+        tasks = self._cancel_background_tasks()
+        self._drain_queue()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._drain_queue()
         await self._queue.join()
-        if not self._client:
-            return
-        try:
-            await self._client.disconnect()
-        except BleakError as ex:
-            _LOGGER.debug("Error disconnecting from device: %s", ex)
-        else:
-            _LOGGER.debug("Disconnected from scale")
+        await self._disconnect_client()
+        _LOGGER.debug("Disconnected from scale")
 
     async def tare(self) -> None:
         """Tare the scale."""
@@ -422,9 +467,11 @@ class AcaiaScale:
                 )
             self.timer_running = True
             if self._timer_start is not None and self._timer_stop is not None:
-                self._timer_start = time.time() - (self._timer_stop - self._timer_start)
+                self._timer_start = time.monotonic() - (
+                    self._timer_stop - self._timer_start
+                )
             else:
-                self._timer_start = time.time()
+                self._timer_start = time.monotonic()
         else:
             _LOGGER.debug('Sending "stop" message.')
             async with self._add_to_queue_lock:
@@ -432,7 +479,7 @@ class AcaiaScale:
                     (self._default_char_id, self._msg_types["stopTimer"])
                 )
             self.timer_running = False
-            self._timer_stop = time.time()
+            self._timer_stop = time.monotonic()
 
     async def reset_timer(self) -> None:
         """Reset the timer."""
@@ -450,107 +497,149 @@ class AcaiaScale:
                 await self._queue.put(
                     (self._default_char_id, self._msg_types["startTimer"])
                 )
-            self._timer_start = time.time()
+            self._timer_start = time.monotonic()
 
     async def on_bluetooth_data_received(
         self,
-        characteristic: BleakGATTCharacteristic,  # pylint: disable=unused-argument
+        _: BleakGATTCharacteristic,
         data: bytearray,
     ) -> None:
         """Receive data from scale."""
+        pending = (self._last_short_msg or bytearray()) + data
+        self._last_short_msg = None
+        header = bytes((HEADER1, HEADER2))
 
-        # For some scales the header is sent and then in next message the content
-        if (
-            self._last_short_msg is not None
-            and self._last_short_msg[0] == HEADER1
-            and self._last_short_msg[1] == HEADER2
-        ):
-            data = self._last_short_msg + data
-            self._last_short_msg = None
-            _LOGGER.debug("Restored message from previous data: %s", data)
-
-        try:
-            msg, _ = decode(data)
-        except AcaiaMessageTooShort as ex:
-            if len(ex.bytes_recvd) < 2:
-                _LOGGER.debug("Received one byte message: %s", ex.bytes_recvd)
-            elif ex.bytes_recvd[0] != HEADER1 or ex.bytes_recvd[1] != HEADER2:
-                _LOGGER.debug("Non-header message too short: %s", ex.bytes_recvd)
-            else:
-                self._last_short_msg = ex.bytes_recvd
-            return
-        except AcaiaMessageTooLong as ex:
-            _LOGGER.debug("%s: %s", ex.message, ex.bytes_recvd)
-            return
-        except AcaiaMessageError as ex:
-            _LOGGER.warning("%s: %s", ex.message, ex.bytes_recvd)
-            return
-
-        if isinstance(msg, Settings):
-            self._device_state = AcaiaDeviceState(
-                battery_level=msg.battery,
-                units=UnitMass(msg.units),
-                beeps=msg.beep_on,
-                auto_off_time=msg.auto_off,
-            )
-            _LOGGER.debug(
-                "Got battery level %s, units %s", str(msg.battery), str(msg.units)
-            )
-
-        elif isinstance(msg, Message):
-            self._weight = msg.value
-            timestamp = time.time()
-
-            # add to weight history for flow rate calculation
-            if msg.value:
-                if self.weight_history:
-                    # Check if weight is increasing before appending
-                    if msg.value > self.weight_history[-1][1]:
-                        self.weight_history.append((timestamp, msg.value))
-                    elif msg.value < self.weight_history[-1][1] - 1:
-                        # Clear history if weight decreases (1gr margin error)
-                        self.weight_history.clear()
-                        self.weight_history.append((timestamp, msg.value))
+        while pending:
+            start = pending.find(header)
+            if start < 0:
+                if pending[-1] == HEADER1:
+                    self._last_short_msg = bytearray((HEADER1,))
                 else:
-                    self.weight_history.append((timestamp, msg.value))
-            # Remove old readings (more than 5 seconds)
-            while self.weight_history and (timestamp - self.weight_history[0][0] > 5):
-                self.weight_history.popleft()
+                    _LOGGER.debug("Ignoring non-header notification: %s", pending)
+                return
+            if start > 0:
+                _LOGGER.debug("Ignoring %s bytes before header", start)
+                pending = pending[start:]
 
-            # handle physical button presses
-            def reset() -> None:
-                """Physically reset the timer."""
-                self._timer_start = None
-                self._timer_stop = None
-                self.timer_running = False
-                self._button_pressed = False
+            try:
+                msg, remaining = decode(pending)
+            except AcaiaMessageTooShort:
+                self._last_short_msg = pending
+                return
+            except AcaiaMessageTooLong:
+                next_start = pending.find(header, 2)
+                while next_start >= 0:
+                    try:
+                        decode(pending[next_start:])
+                    except AcaiaMessageError:
+                        next_start = pending.find(header, next_start + 2)
+                    else:
+                        break
+                if next_start < 0:
+                    self._last_short_msg = pending
+                    return
+                _LOGGER.debug("Discarding incomplete frame before next header")
+                pending = pending[next_start:]
+                continue
+            except AcaiaMessageError as ex:
+                _LOGGER.warning("%s: %s", ex.message, ex.bytes_recvd)
+                pending = pending[2:]
+                continue
 
-            def reset_on_power_button() -> None:
-                """Pressing the power button two consecutive times resets the timer."""
-                if self._button_pressed:
-                    reset()
-                else:
-                    self._button_pressed = True
-
-            if msg.button == "start":
-                self.timer_running = True
-                if self._timer_start is not None and self._timer_stop is not None:
-                    self._timer_start = time.time() - (
-                        self._timer_stop - self._timer_start
+            match msg:
+                case Settings():
+                    self._device_state = AcaiaDeviceState(
+                        battery_level=msg.battery,
+                        units=UnitMass(msg.units),
+                        beeps=msg.beep_on,
+                        auto_off_time=msg.auto_off,
                     )
-                else:
-                    self._timer_start = time.time()
-                reset_on_power_button()
-            elif msg.button == "stop":
-                self.timer_running = False
-                self._timer_stop = time.time()
-                reset_on_power_button()
-            elif msg.button == "reset":
+                    _LOGGER.debug(
+                        "Got battery level %s, units %s",
+                        str(msg.battery),
+                        str(msg.units),
+                    )
+                case WeightMessage():
+                    self._update_weight(msg.weight)
+                case TimerMessage():
+                    self._update_timer(msg.time)
+                case ButtonMessage():
+                    if msg.weight is not None:
+                        self._update_weight(msg.weight)
+                    self._handle_button(msg.button, msg.timer_running, msg.time)
+
+            if self._notify_callback is not None:
+                self._notify_callback()
+            pending = remaining
+
+    def _update_weight(self, weight: float | None) -> None:
+        """Store the latest weight and update the flow-rate history."""
+        self._weight = weight
+        timestamp = time.monotonic()
+
+        # add to weight history for flow rate calculation
+        if weight is not None:
+            if self.weight_history:
+                # Check if weight is increasing before appending
+                if weight > self.weight_history[-1][1]:
+                    self.weight_history.append((timestamp, weight))
+                elif weight < self.weight_history[-1][1] - 1:
+                    # Clear history if weight decreases (1gr margin error)
+                    self.weight_history.clear()
+                    self.weight_history.append((timestamp, weight))
+            else:
+                self.weight_history.append((timestamp, weight))
+        # Remove old readings (more than 5 seconds)
+        while self.weight_history and (timestamp - self.weight_history[0][0] > 5):
+            self.weight_history.popleft()
+        _LOGGER.debug("Got weight %s", str(weight))
+
+    def _update_timer(self, elapsed_time: float) -> None:
+        """Anchor the local timer to a value reported by the scale."""
+        now = time.monotonic()
+        self._timer_start = now - elapsed_time
+        self._timer_stop = None if self.timer_running else now
+
+    def _handle_button(
+        self,
+        button: ButtonType,
+        timer_running: bool | None,
+        elapsed_time: float | None,
+    ) -> None:
+        """Update the timer state from a physical button press."""
+
+        def reset() -> None:
+            """Physically reset the timer."""
+            self._timer_start = None
+            self._timer_stop = None
+            self.timer_running = False
+            self._button_pressed = False
+
+        def reset_on_power_button() -> None:
+            """Pressing the power button two consecutive times resets the timer."""
+            if self._button_pressed:
                 reset()
+            else:
+                self._button_pressed = True
 
-            if msg.timer_running is not None:
-                self.timer_running = msg.timer_running
-            _LOGGER.debug("Got weight %s", str(msg.value))
+        if button == ButtonType.START:
+            self.timer_running = True
+            if self._timer_start is not None and self._timer_stop is not None:
+                self._timer_start = time.monotonic() - (
+                    self._timer_stop - self._timer_start
+                )
+            else:
+                self._timer_start = time.monotonic()
+            reset_on_power_button()
+        elif button == ButtonType.STOP:
+            self.timer_running = False
+            if elapsed_time is None:
+                self._timer_stop = time.monotonic()
+            else:
+                self._update_timer(elapsed_time)
+            reset_on_power_button()
+        elif button == ButtonType.RESET:
+            reset()
 
-        if self._notify_callback is not None:
-            self._notify_callback()
+        if timer_running is not None:
+            self.timer_running = timer_running

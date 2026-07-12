@@ -1,8 +1,8 @@
 [project]
 name = "aioacaia"
-version = "0.1.18"
-license = "AGPL-3.0-only"
-description = "An async implementation of PyAcaia"
+version = "0.2.0"
+license = "MIT"
+description = "Python library to interact with acaia Bluetooth scales."
 readme = "README.md"
 authors = [
     { name = "Josef Zweck", email = "24647999+zweckj@users.noreply.github.com" },
@@ -18,6 +18,8 @@ classifiers = [
     "Natural Language :: English",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = ["bleak >= 0.20.2", "bleak-retry-connector >= 4.0.0"]
 requires-python = ">= 3.12"
@@ -35,4 +37,16 @@ dev = [
     "pytest == 8.3.3",
     "pytest-asyncio == 0.24.0",
     "pytest-cov == 6.0.0",
+    "ruff == 0.15.15",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+extend-select = ["I"]

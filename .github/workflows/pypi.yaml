@@ -35,6 +35,9 @@ jobs:
       run: |
         uv pip install --system -r pyproject.toml --extra dev
 
+    - name: Test
+      run: pytest -q
+
     - name: Build package
       run: uv build
     
