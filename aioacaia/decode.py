@@ -2,6 +2,8 @@
 
 import logging
 from dataclasses import dataclass
+from enum import IntEnum, StrEnum
+from typing import Final
 
 from bleak import BleakGATTCharacteristic
 
@@ -10,220 +12,211 @@ from .exceptions import AcaiaMessageError, AcaiaMessageTooLong, AcaiaMessageTooS
 
 _LOGGER = logging.getLogger(__name__)
 
+_EVENT_COMMAND: Final = 12
+_SETTINGS_COMMAND: Final = 8
 
-@dataclass
-class Message:
-    """Representation of a message from the scale."""
+# Divisor applied to a raw weight value, keyed by the unit byte.
+_WEIGHT_UNIT_DIVISORS: Final = {1: 10.0, 2: 100.0, 3: 1000.0, 4: 10000.0}
 
-    def __init__(self, msg_type: int, payload: bytearray | list[int]) -> None:
-        self.msg_type = msg_type
-        self.payload = payload
-        self.value: float | None = None
-        self.button: str | None = None
-        self.time: int | None = None
-        self.timer_running: bool | None = None
 
-        _LOGGER.debug(
-            "Message received: msg_type: %s, payload: %s",
-            str(msg_type),
-            payload,
-        )
+class MessageType(IntEnum):
+    """Type of an event notification payload."""
 
-        # weight message
-        if self.msg_type == 5:
-            self.value = self._decode_weight(payload)
+    WEIGHT = 5
+    TIMER = 7
+    BUTTON = 8
+    HEARTBEAT = 11
 
-        # heartbeat response
-        elif self.msg_type == 11:
-            if payload[2] == 5:
-                self.value = self._decode_weight(payload[3:])
-            elif payload[2] == 7:
-                self.time = self._decode_time(payload[3:])
-            _LOGGER.debug(
-                "heartbeat response (weight: %s, time: %s)", self.value, self.time
-            )
 
-        # time message
-        elif self.msg_type == 7:
-            self.time = self._decode_time(payload)
-            _LOGGER.debug("timer: %s", self.time)
+class ButtonType(StrEnum):
+    """Physical button reported by a button notification."""
 
-        # button message
-        elif self.msg_type == 8:
-            if payload[0] == 0 and payload[1] == 5:
-                self.button = "tare"
-                self.value = self._decode_weight(payload[2:])
-                _LOGGER.debug("tare (weight: %s)", self.value)
-            elif payload[0] == 8 and payload[1] == 5:
-                self.button = "start"
-                self.timer_running = True
-                self.value = self._decode_weight(payload[2:])
-                _LOGGER.debug("Timer started. Weight: %s", self.value)
-            elif payload[0] == 8 and payload[1] == 11:
-                self.button = "start"
-                self.timer_running = True
-                _LOGGER.debug("Timer started")
-            elif payload[0] == 10 and payload[1] == 7:
-                self.button = "stop"
-                self.timer_running = False
-                self.time = self._decode_time(payload[2:])
-                self.value = self._decode_weight(payload[6:])
-                _LOGGER.debug(
-                    "Timer stopped. Time: %s, weight: %s",
-                    self.time,
-                    self.value,
-                )
-            elif payload[0] == 10 and payload[1] == 5:
-                self.button = "stop"
-                self.timer_running = False
-                self.time = self._decode_time(payload[2:])
-                _LOGGER.debug("Timer stopped. Time: %s", self.time)
-            elif payload[0] == 10 and payload[1] == 13:
-                self.button = "stop"
-                self.timer_running = False
-                _LOGGER.debug("Timer stopped")
-            elif payload[0] == 9 and payload[1] == 7:
-                self.button = "reset"
-                self.time = self._decode_time(payload[2:])
-                self.value = self._decode_weight(payload[6:])
-                _LOGGER.debug(
-                    "Timer reset. Time: %s, weight: %s", self.time, self.value
-                )
-            elif payload[0] == 9 and payload[1] == 5:
-                self.button = "reset"
-                self.time = self._decode_time(payload[2:])
-                _LOGGER.debug("reset time: %s", self.time)
+    TARE = "tare"
+    START = "start"
+    STOP = "stop"
+    RESET = "reset"
+    UNKNOWN = "unknownbutton"
 
-            elif payload[0] == 9 and payload[1] == 12:
-                self.button = "reset"
-                _LOGGER.debug("Timer reset")
-            else:
-                self.button = "unknownbutton"
-                _LOGGER.debug(
-                    "Uknown Button: %s,%s. Full payload: %s",
-                    payload[0],
-                    payload[1],
-                    str(payload),
-                )
-        else:
-            raise AcaiaMessageError(bytearray(payload), "Unknown message type")
 
-    def _decode_weight(self, weight_payload):
-        value = ((weight_payload[1] & 0xFF) << 8) + (weight_payload[0] & 0xFF)
-        unit = weight_payload[4] & 0xFF
-        if unit == 1:
-            value /= 10.0
-        elif unit == 2:
-            value /= 100.0
-        elif unit == 3:
-            value /= 1000.0
-        elif unit == 4:
-            value /= 10000.0
-        else:
-            raise ValueError(f"unit value not in range {unit}")
+def decode_weight(weight_payload: bytearray | list[int]) -> float:
+    """Decode a weight in grams from a payload."""
+    value: float = ((weight_payload[1] & 0xFF) << 8) + (weight_payload[0] & 0xFF)
+    unit = weight_payload[4] & 0xFF
+    if unit not in _WEIGHT_UNIT_DIVISORS:
+        raise ValueError(f"unit value not in range {unit}")
+    value /= _WEIGHT_UNIT_DIVISORS[unit]
+    if weight_payload[5] & 0x02:
+        value *= -1
+    return value
 
-        if (weight_payload[5] & 0x02) == 0x02:
-            value *= -1
-        return value
 
-    def _decode_time(self, time_payload):
-        value = (time_payload[0] & 0xFF) * 60
-        value = value + (time_payload[1])
-        value = value + (time_payload[2] / 10.0)
-        return value
+def decode_time(time_payload: bytearray | list[int]) -> float:
+    """Decode a time in seconds from a payload."""
+    minutes = (time_payload[0] & 0xFF) * 60
+    return minutes + time_payload[1] + time_payload[2] / 10.0
+
+
+@dataclass(frozen=True)
+class WeightMessage:
+    """A weight reading from the scale."""
+
+    weight: float
+
+
+@dataclass(frozen=True)
+class TimerMessage:
+    """A timer reading from the scale."""
+
+    time: float
+
+
+@dataclass(frozen=True)
+class ButtonMessage:
+    """A physical button press reported by the scale."""
+
+    button: ButtonType
+    timer_running: bool | None = None
+    time: float | None = None
+    weight: float | None = None
+
+
+ScaleMessage = WeightMessage | TimerMessage | ButtonMessage
+
+
+@dataclass(frozen=True)
+class _ButtonEvent:
+    """How to decode a button notification payload."""
+
+    button: ButtonType
+    timer_running: bool | None = None
+    time_at: int | None = None
+    weight_at: int | None = None
+
+
+# Button events keyed by (payload[0], payload[1]).
+_BUTTON_EVENTS: Final[dict[tuple[int, int], _ButtonEvent]] = {
+    (0, 5): _ButtonEvent(ButtonType.TARE, weight_at=2),
+    (8, 5): _ButtonEvent(ButtonType.START, timer_running=True, weight_at=2),
+    (8, 11): _ButtonEvent(ButtonType.START, timer_running=True),
+    (10, 7): _ButtonEvent(ButtonType.STOP, timer_running=False, time_at=2, weight_at=6),
+    (10, 5): _ButtonEvent(ButtonType.STOP, timer_running=False, time_at=2),
+    (10, 13): _ButtonEvent(ButtonType.STOP, timer_running=False),
+    (9, 7): _ButtonEvent(ButtonType.RESET, time_at=2, weight_at=6),
+    (9, 5): _ButtonEvent(ButtonType.RESET, time_at=2),
+    (9, 12): _ButtonEvent(ButtonType.RESET),
+}
+
+
+def _parse_button(payload: bytearray | list[int]) -> ButtonMessage:
+    """Decode a button notification payload."""
+    event = _BUTTON_EVENTS.get((payload[0], payload[1]))
+    if event is None:
+        _LOGGER.debug("Unknown button, full payload: %s", payload)
+        return ButtonMessage(ButtonType.UNKNOWN)
+
+    time = decode_time(payload[event.time_at :]) if event.time_at is not None else None
+    weight = (
+        decode_weight(payload[event.weight_at :])
+        if event.weight_at is not None
+        else None
+    )
+    return ButtonMessage(event.button, event.timer_running, time, weight)
+
+
+def _parse_heartbeat(
+    payload: bytearray | list[int],
+) -> WeightMessage | TimerMessage | None:
+    """Decode the weight or timer wrapped in a heartbeat response."""
+    inner_type = payload[2]
+    if inner_type == MessageType.WEIGHT:
+        return WeightMessage(decode_weight(payload[3:]))
+    if inner_type == MessageType.TIMER:
+        return TimerMessage(decode_time(payload[3:]))
+    return None
+
+
+def _parse_message(
+    msg_type: int, payload: bytearray | list[int]
+) -> ScaleMessage | None:
+    """Decode an event notification payload into a message."""
+    _LOGGER.debug("Message received: msg_type: %s, payload: %s", msg_type, payload)
+    if msg_type == MessageType.WEIGHT:
+        return WeightMessage(decode_weight(payload))
+    if msg_type == MessageType.TIMER:
+        return TimerMessage(decode_time(payload))
+    if msg_type == MessageType.HEARTBEAT:
+        return _parse_heartbeat(payload)
+    if msg_type == MessageType.BUTTON:
+        return _parse_button(payload)
+    raise AcaiaMessageError(bytearray(payload), "Unknown message type")
 
 
 @dataclass
 class Settings:
-    """Representation of the settings from the scale."""
+    """Decoded settings from the scale."""
 
-    def __init__(self, payload: bytearray) -> None:
-        # payload[0] is unknown
-        self.battery = payload[1] & 0x7F
-        if payload[2] == 2:
-            self.units = "grams"
-        elif payload[2] == 5:
-            self.units = "ounces"
-        else:
-            self.units = "grams"
-        # payload[2 and 3] is unknown
-        self.auto_off = payload[4] * 5
-        # payload[5] is unknown
-        self.beep_on = payload[6] == 1
-        # payload[7-9] unknown
+    battery: int
+    units: str
+    auto_off: int
+    beep_on: bool
+
+    @classmethod
+    def parse(cls, payload: bytearray) -> "Settings":
+        """Decode a settings payload."""
+        settings = cls(
+            battery=payload[1] & 0x7F,
+            units="ounces" if payload[2] == 5 else "grams",
+            auto_off=payload[4] * 5,
+            beep_on=payload[6] == 1,
+        )
         _LOGGER.debug(
             "settings: battery=%s %s, auto_off=%s, beep=%s",
-            self.battery,
-            self.units,
-            self.auto_off,
-            self.beep_on,
+            settings.battery,
+            settings.units,
+            settings.auto_off,
+            settings.beep_on,
         )
-        _LOGGER.debug(
-            "unknown settings: %s",
-            str(
-                [
-                    payload[0],
-                    payload[1] & 0x80,
-                    payload[3],
-                    payload[5],
-                    payload[7],
-                    payload[8],
-                    payload[9],
-                ]
-            ),
-        )
+        return settings
 
 
-def decode(byte_msg: bytearray):
-    """Return a tuple - first element is the message, or None
-    if one not yet found.  Second is are the remaining
-    bytes, which can be empty
-    Messages are encoded as the encode() function above,
-    min message length is 6 bytes
-    HEADER1 (0xef)
-    HEADER1 (0xdd)
-    command
-    length  (including this byte, excluding checksum)
-    payload of length-1 bytes
-    checksum byte1
-    checksum byte2
-
-    """
-    msg_start = -1
-
+def decode(byte_msg: bytearray) -> tuple[ScaleMessage | Settings | None, bytearray]:
+    """Decode one message, returning it (or None) and any remaining bytes."""
+    header_index = -1
     for i in range(len(byte_msg) - 1):
         if byte_msg[i] == HEADER1 and byte_msg[i + 1] == HEADER2:
-            msg_start = i
+            header_index = i
             break
 
-    if msg_start < 0 or len(byte_msg) - msg_start < 6:
+    if header_index < 0 or len(byte_msg) - header_index < 6:
         raise AcaiaMessageTooShort(byte_msg)
 
-    msg_end = msg_start + byte_msg[msg_start + 3] + 5
-
+    msg_end = header_index + byte_msg[header_index + 3] + 5
     if msg_end > len(byte_msg):
-        if byte_msg[i] != HEADER1 or byte_msg[1] != HEADER2:
+        # Preserve existing behavior: byte_msg[1] checks the 2nd byte, not header_index + 1.
+        if byte_msg[header_index] != HEADER1 or byte_msg[1] != HEADER2:
             raise AcaiaMessageError(byte_msg, "Long message without headers")
         raise AcaiaMessageTooLong(byte_msg)
 
-    if msg_start > 0:
-        _LOGGER.debug("Ignoring %s bytes before header", i)
+    if header_index > 0:
+        _LOGGER.debug("Ignoring %s bytes before header", header_index)
 
-    cmd = byte_msg[msg_start + 2]
-    if cmd == 12:
-        msg_type = byte_msg[msg_start + 4]
-        payload_in = byte_msg[msg_start + 5 : msg_end]
-        return (Message(msg_type, payload_in), byte_msg[msg_end:])
-    if cmd == 8:
-        return (Settings(byte_msg[msg_start + 3 :]), byte_msg[msg_end:])
+    cmd = byte_msg[header_index + 2]
+    remaining = byte_msg[msg_end:]
+
+    if cmd == _EVENT_COMMAND:
+        msg_type = byte_msg[header_index + 4]
+        payload = byte_msg[header_index + 5 : msg_end]
+        return _parse_message(msg_type, payload), remaining
+
+    if cmd == _SETTINGS_COMMAND:
+        return Settings.parse(byte_msg[header_index + 3 :]), remaining
 
     _LOGGER.debug(
-        "Non event notification message command %s %s",
-        str(cmd),
-        str(byte_msg[msg_start:msg_end]),
+        "Non event notification message command %s: %s",
+        cmd,
+        byte_msg[header_index:msg_end],
     )
-    _LOGGER.debug("Full message: %s", byte_msg)
-    return (None, byte_msg[msg_end:])
+    return None, remaining
 
 
 def notification_handler(sender: BleakGATTCharacteristic, data: bytearray) -> None:
@@ -232,5 +225,5 @@ def notification_handler(sender: BleakGATTCharacteristic, data: bytearray) -> No
     if isinstance(msg, Settings):
         print(f"Battery: {msg.battery}")
         print(f"Units: {msg.units}")
-    elif isinstance(msg, Message):
-        print(f"Weight: {msg.value}")
+    elif isinstance(msg, WeightMessage):
+        print(f"Weight: {msg.weight}")

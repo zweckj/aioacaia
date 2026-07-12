@@ -22,7 +22,14 @@ from .const import (
     OLD_STYLE_CHAR_ID,
     UnitMass,
 )
-from .decode import Message, Settings, decode
+from .decode import (
+    ButtonMessage,
+    ButtonType,
+    Settings,
+    TimerMessage,
+    WeightMessage,
+    decode,
+)
 from .exceptions import (
     AcaiaDeviceNotFound,
     AcaiaError,
@@ -486,71 +493,82 @@ class AcaiaScale:
             _LOGGER.warning("%s: %s", ex.message, ex.bytes_recvd)
             return
 
-        if isinstance(msg, Settings):
-            self._device_state = AcaiaDeviceState(
-                battery_level=msg.battery,
-                units=UnitMass(msg.units),
-                beeps=msg.beep_on,
-                auto_off_time=msg.auto_off,
-            )
-            _LOGGER.debug(
-                "Got battery level %s, units %s", str(msg.battery), str(msg.units)
-            )
-
-        elif isinstance(msg, Message):
-            self._weight = msg.value
-            timestamp = time.time()
-
-            # add to weight history for flow rate calculation
-            if msg.value:
-                if self.weight_history:
-                    # Check if weight is increasing before appending
-                    if msg.value > self.weight_history[-1][1]:
-                        self.weight_history.append((timestamp, msg.value))
-                    elif msg.value < self.weight_history[-1][1] - 1:
-                        # Clear history if weight decreases (1gr margin error)
-                        self.weight_history.clear()
-                        self.weight_history.append((timestamp, msg.value))
-                else:
-                    self.weight_history.append((timestamp, msg.value))
-            # Remove old readings (more than 5 seconds)
-            while self.weight_history and (timestamp - self.weight_history[0][0] > 5):
-                self.weight_history.popleft()
-
-            # handle physical button presses
-            def reset() -> None:
-                """Physically reset the timer."""
-                self._timer_start = None
-                self._timer_stop = None
-                self.timer_running = False
-                self._button_pressed = False
-
-            def reset_on_power_button() -> None:
-                """Pressing the power button two consecutive times resets the timer."""
-                if self._button_pressed:
-                    reset()
-                else:
-                    self._button_pressed = True
-
-            if msg.button == "start":
-                self.timer_running = True
-                if self._timer_start is not None and self._timer_stop is not None:
-                    self._timer_start = time.time() - (
-                        self._timer_stop - self._timer_start
-                    )
-                else:
-                    self._timer_start = time.time()
-                reset_on_power_button()
-            elif msg.button == "stop":
-                self.timer_running = False
-                self._timer_stop = time.time()
-                reset_on_power_button()
-            elif msg.button == "reset":
-                reset()
-
-            if msg.timer_running is not None:
-                self.timer_running = msg.timer_running
-            _LOGGER.debug("Got weight %s", str(msg.value))
+        match msg:
+            case Settings():
+                self._device_state = AcaiaDeviceState(
+                    battery_level=msg.battery,
+                    units=UnitMass(msg.units),
+                    beeps=msg.beep_on,
+                    auto_off_time=msg.auto_off,
+                )
+                _LOGGER.debug(
+                    "Got battery level %s, units %s", str(msg.battery), str(msg.units)
+                )
+            case WeightMessage():
+                self._update_weight(msg.weight)
+            case TimerMessage():
+                self._update_weight(None)
+            case ButtonMessage():
+                self._update_weight(msg.weight)
+                self._handle_button(msg.button, msg.timer_running)
 
         if self._notify_callback is not None:
             self._notify_callback()
+
+    def _update_weight(self, weight: float | None) -> None:
+        """Store the latest weight and update the flow-rate history."""
+        self._weight = weight
+        timestamp = time.time()
+
+        # add to weight history for flow rate calculation
+        if weight:
+            if self.weight_history:
+                # Check if weight is increasing before appending
+                if weight > self.weight_history[-1][1]:
+                    self.weight_history.append((timestamp, weight))
+                elif weight < self.weight_history[-1][1] - 1:
+                    # Clear history if weight decreases (1gr margin error)
+                    self.weight_history.clear()
+                    self.weight_history.append((timestamp, weight))
+            else:
+                self.weight_history.append((timestamp, weight))
+        # Remove old readings (more than 5 seconds)
+        while self.weight_history and (timestamp - self.weight_history[0][0] > 5):
+            self.weight_history.popleft()
+        _LOGGER.debug("Got weight %s", str(weight))
+
+    def _handle_button(self, button: ButtonType, timer_running: bool | None) -> None:
+        """Update the timer state from a physical button press."""
+
+        def reset() -> None:
+            """Physically reset the timer."""
+            self._timer_start = None
+            self._timer_stop = None
+            self.timer_running = False
+            self._button_pressed = False
+
+        def reset_on_power_button() -> None:
+            """Pressing the power button two consecutive times resets the timer."""
+            if self._button_pressed:
+                reset()
+            else:
+                self._button_pressed = True
+
+        if button == ButtonType.START:
+            self.timer_running = True
+            if self._timer_start is not None and self._timer_stop is not None:
+                self._timer_start = time.time() - (
+                    self._timer_stop - self._timer_start
+                )
+            else:
+                self._timer_start = time.time()
+            reset_on_power_button()
+        elif button == ButtonType.STOP:
+            self.timer_running = False
+            self._timer_stop = time.time()
+            reset_on_power_button()
+        elif button == ButtonType.RESET:
+            reset()
+
+        if timer_running is not None:
+            self.timer_running = timer_running
