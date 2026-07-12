@@ -1,6 +1,6 @@
 # aioacaia
 
-Async implementation of [pyacaia](https://github.com/lucapinello/pyacaia), based on `asyncio` and `bleak`
+Python library to interact with your acaia scales. Initially based [pyacaia](https://github.com/lucapinello/pyacaia), but fully re-written to support `asyncio` and `bleak`.
 
 # Usage
 
