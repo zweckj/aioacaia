@@ -1,10 +1,10 @@
-"""Tests for the main logic paths of aioacaia.acaiascale."""
+"""Tests for the main logic paths of aioacaia.scale."""
 
 from unittest.mock import Mock
 
 import pytest
 
-from aioacaia.acaiascale import AcaiaScale
+from aioacaia.scale import AcaiaScale
 from aioacaia.const import UnitMass
 from tests.fixtures import messages as m
 
@@ -92,7 +92,7 @@ async def test_receive_ignores_non_header_short_message():
 
 def test_timer_while_running(monkeypatch):
     """While running, the timer reports elapsed time since start."""
-    monkeypatch.setattr("aioacaia.acaiascale.time.time", lambda: 1050.0)
+    monkeypatch.setattr("aioacaia.scale.time.time", lambda: 1050.0)
     scale = _make_scale()
     scale._timer_start = 1000.0
     scale.timer_running = True

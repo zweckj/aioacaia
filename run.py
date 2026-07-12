@@ -1,9 +1,8 @@
 import asyncio
 
 from aioacaia import AcaiaScale
-from aioacaia.decode import notification_handler
-from aioacaia.decode import decode
-from aioacaia.helpers import is_new_scale
+from aioacaia.parser import decode, notification_handler
+from aioacaia.discovery import is_new_scale
 
 
 async def main():

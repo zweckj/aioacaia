@@ -1,16 +1,16 @@
-"""Tests for aioacaia.decode covering each message-parsing path."""
+"""Tests for aioacaia.parser covering each message-parsing path."""
 
 import pytest
 
-from aioacaia.acaiascale import AcaiaScale
-from aioacaia.decode import (
+from aioacaia.scale import AcaiaScale
+from aioacaia.messages import (
     ButtonMessage,
     ButtonType,
     Settings,
     TimerMessage,
     WeightMessage,
-    decode,
 )
+from aioacaia.parser import decode
 from aioacaia.exceptions import (
     AcaiaMessageError,
     AcaiaMessageTooLong,

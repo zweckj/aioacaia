@@ -22,14 +22,14 @@ from .const import (
     OLD_STYLE_CHAR_ID,
     UnitMass,
 )
-from .decode import (
+from .messages import (
     ButtonMessage,
     ButtonType,
     Settings,
     TimerMessage,
     WeightMessage,
-    decode,
 )
+from .parser import decode
 from .exceptions import (
     AcaiaDeviceNotFound,
     AcaiaError,
@@ -37,7 +37,8 @@ from .exceptions import (
     AcaiaMessageTooLong,
     AcaiaMessageTooShort,
 )
-from .helpers import derive_model_name, encode, encode_id, encode_notification_request
+from .discovery import derive_model_name
+from .encoder import encode, encode_id, encode_notification_request
 
 _LOGGER = logging.getLogger(__name__)
 

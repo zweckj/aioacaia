@@ -2,7 +2,7 @@
 name = "aioacaia"
 version = "0.2.0"
 license = "MIT"
-description = "An async implementation of PyAcaia"
+description = "Python library to interact with acaia Bluetooth scales."
 readme = "README.md"
 authors = [
     { name = "Josef Zweck", email = "24647999+zweckj@users.noreply.github.com" },
