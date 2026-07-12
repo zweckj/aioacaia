@@ -23,6 +23,17 @@ _LOGGER = logging.getLogger(__name__)
 _EVENT_COMMAND: Final = 12
 _SETTINGS_COMMAND: Final = 8
 
+# Two-byte start-of-frame marker.
+_HEADER: Final = bytes([HEADER1, HEADER2])
+_MIN_FRAME_LENGTH: Final = 6
+# Byte offsets within a frame, relative to the start of the header.
+_COMMAND_OFFSET: Final = 2
+_LENGTH_OFFSET: Final = 3
+_MESSAGE_TYPE_OFFSET: Final = 4
+_PAYLOAD_OFFSET: Final = 5
+# Non-payload bytes not counted by the length byte: 2 headers + command + 2 checksum.
+_FRAME_OVERHEAD: Final = 5
+
 # Divisor applied to a raw weight value, keyed by the unit byte.
 _WEIGHT_UNIT_DIVISORS: Final = {1: 10.0, 2: 100.0, 3: 1000.0, 4: 10000.0}
 
@@ -142,45 +153,38 @@ def _parse_message(
 
 def decode(byte_msg: bytearray) -> tuple[ScaleMessage | Settings | None, bytearray]:
     """Decode one message, returning it (or None) and any remaining bytes."""
-    header_index = -1
-    for i in range(len(byte_msg) - 1):
-        if byte_msg[i] == HEADER1 and byte_msg[i + 1] == HEADER2:
-            header_index = i
-            break
-
-    if header_index < 0 or len(byte_msg) - header_index < 6:
+    # Frame layout: HEADER1, HEADER2, command, length, payload..., checksum, checksum
+    start = byte_msg.find(_HEADER)
+    if start < 0 or len(byte_msg) - start < _MIN_FRAME_LENGTH:
         raise AcaiaMessageTooShort(byte_msg)
 
-    msg_end = header_index + byte_msg[header_index + 3] + 5
+    msg_end = start + byte_msg[start + _LENGTH_OFFSET] + _FRAME_OVERHEAD
     if msg_end > len(byte_msg):
-        # Preserve existing behavior: byte_msg[1] checks the 2nd byte, not header_index + 1.
-        if byte_msg[header_index] != HEADER1 or byte_msg[1] != HEADER2:
-            raise AcaiaMessageError(byte_msg, "Long message without headers")
         raise AcaiaMessageTooLong(byte_msg)
 
-    if header_index > 0:
-        _LOGGER.debug("Ignoring %s bytes before header", header_index)
+    if start > 0:
+        _LOGGER.debug("Ignoring %s bytes before header", start)
 
-    cmd = byte_msg[header_index + 2]
+    command = byte_msg[start + _COMMAND_OFFSET]
     remaining = byte_msg[msg_end:]
 
-    if cmd == _EVENT_COMMAND:
-        msg_type = byte_msg[header_index + 4]
-        payload = byte_msg[header_index + 5 : msg_end]
+    if command == _EVENT_COMMAND:
+        msg_type = byte_msg[start + _MESSAGE_TYPE_OFFSET]
+        payload = byte_msg[start + _PAYLOAD_OFFSET : msg_end]
         return _parse_message(msg_type, payload), remaining
 
-    if cmd == _SETTINGS_COMMAND:
-        return _parse_settings(byte_msg[header_index + 3 :]), remaining
+    if command == _SETTINGS_COMMAND:
+        return _parse_settings(byte_msg[start + _LENGTH_OFFSET :]), remaining
 
     _LOGGER.debug(
         "Non event notification message command %s: %s",
-        cmd,
-        byte_msg[header_index:msg_end],
+        command,
+        byte_msg[start:msg_end],
     )
     return None, remaining
 
 
-def notification_handler(sender: BleakGATTCharacteristic, data: bytearray) -> None:
+def notification_handler(_: BleakGATTCharacteristic, data: bytearray) -> None:
     """Sample for callback for handling incoming notifications from the scale."""
     msg = decode(data)[0]
     if isinstance(msg, Settings):
