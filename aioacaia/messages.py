@@ -11,7 +11,7 @@ class ButtonType(StrEnum):
     START = "start"
     STOP = "stop"
     RESET = "reset"
-    UNKNOWN = "unknownbutton"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
