@@ -7,23 +7,23 @@ class AcaiaScaleException(Exception):
     """Base class for exceptions in this module."""
 
 
-class AcaiaDeviceNotFound(BleakDeviceNotFoundError):
+class AcaiaDeviceNotFound(BleakDeviceNotFoundError, AcaiaScaleException):
     """Exception when no device is found."""
 
 
-class AcaiaError(BleakError):
+class AcaiaError(BleakError, AcaiaScaleException):
     """Exception for general bleak errors."""
 
 
-class AcaiaUnknownDevice(Exception):
+class AcaiaUnknownDevice(AcaiaScaleException):
     """Exception for unknown devices."""
 
 
-class AcaiaMessageError(Exception):
+class AcaiaMessageError(AcaiaScaleException):
     """Exception for message errors."""
 
     def __init__(self, bytes_recvd: bytearray, message: str) -> None:
-        super().__init__()
+        super().__init__(message)
         self.message = message
         self.bytes_recvd = bytes_recvd
 

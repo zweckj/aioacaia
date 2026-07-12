@@ -6,9 +6,16 @@ from aioacaia.const import HEADER1, HEADER2
 _EVENT_CMD = 0x0C
 
 
+def _frame(command: int, payload: bytes) -> bytes:
+    """Wrap a command payload with its length and split checksum."""
+    body = bytes([len(payload) + 1]) + payload
+    checksum = bytes((sum(body[0::2]) & 0xFF, sum(body[1::2]) & 0xFF))
+    return bytes([HEADER1, HEADER2, command]) + body + checksum
+
+
 def frame(msg_type: int, payload: bytes) -> bytes:
     """Wrap a payload in an event-notification frame (command 12)."""
-    return bytes([HEADER1, HEADER2, _EVENT_CMD, len(payload), msg_type]) + bytes(payload)
+    return _frame(_EVENT_CMD, bytes([msg_type]) + payload)
 
 
 # Reusable sub-payloads with known decoded values.
@@ -22,7 +29,9 @@ WEIGHT_NEGATIVE = frame(5, bytes([0xDF, 0x06, 0x00, 0x00, 0x01, 0x02]))  # -> -1
 WEIGHT_UNIT_100 = frame(5, bytes([0xDF, 0x06, 0x00, 0x00, 0x02, 0x00]))  # -> 17.59
 WEIGHT_UNIT_1000 = frame(5, bytes([0xDF, 0x06, 0x00, 0x00, 0x03, 0x00]))  # -> 1.759
 WEIGHT_UNIT_10000 = frame(5, bytes([0xDF, 0x06, 0x00, 0x00, 0x04, 0x00]))  # -> 0.1759
-WEIGHT_BAD_UNIT = frame(5, bytes([0xDF, 0x06, 0x00, 0x00, 0x00, 0x00]))  # unit 0 -> ValueError
+WEIGHT_BAD_UNIT = frame(
+    5, bytes([0xDF, 0x06, 0x00, 0x00, 0x00, 0x00])
+)  # unit 0 -> ValueError
 
 # --- Timer (msg_type 7) ---
 TIMER = frame(7, _TIME)  # -> 90.5
@@ -53,12 +62,17 @@ UNKNOWN_TYPE = frame(99, bytes([0, 0]))
 # Real capture; battery 93, grams, auto_off 5 min, beep on.
 SETTINGS_GRAMS = bytes.fromhex("efdd08095d020201000101000d60")
 # Same message with the units byte flipped to ounces (0x05).
-SETTINGS_OUNCES = SETTINGS_GRAMS[:5] + b"\x05" + SETTINGS_GRAMS[6:]
+SETTINGS_OUNCES = _frame(0x08, bytes.fromhex("5d05020100010100"))
 
 # --- decode() framing edge cases ---
 HEADER_ONLY = bytes.fromhex("efdd0c")  # too short; also split part 1
 SPLIT_REMAINDER = bytes.fromhex("0c05df060000010007000002f30d")  # split part 2
 TOO_LONG = bytes.fromhex("efdd0c200500")  # length byte claims more bytes than present
-UNKNOWN_COMMAND = bytes([HEADER1, HEADER2, 0x05, 0x02, 0x00, 0x00, 0x00])
+UNKNOWN_COMMAND = _frame(0x05, b"\x00")
 LEADING_GARBAGE = bytes([0x00, 0x01, 0x02]) + WEIGHT
 TWO_MESSAGES = WEIGHT + SETTINGS_GRAMS
+BAD_CHECKSUM = WEIGHT[:-1] + bytes([WEIGHT[-1] ^ 0x01])
+SHORT_WEIGHT = frame(5, b"\x00")
+WEIGHT_WITH_EMBEDDED_HEADER = frame(
+    5, bytes([HEADER1, HEADER2, 0x00, 0x00, 0x01, 0x00])
+)

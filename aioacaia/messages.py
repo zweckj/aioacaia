@@ -14,21 +14,21 @@ class ButtonType(StrEnum):
     UNKNOWN = "unknown"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WeightMessage:
     """A weight reading from the scale."""
 
     weight: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TimerMessage:
     """A timer reading from the scale."""
 
     time: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ButtonMessage:
     """A physical button press reported by the scale."""
 
@@ -38,10 +38,10 @@ class ButtonMessage:
     weight: float | None = None
 
 
-ScaleMessage = WeightMessage | TimerMessage | ButtonMessage
+type ScaleMessage = WeightMessage | TimerMessage | ButtonMessage
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Settings:
     """Decoded settings from the scale."""
 

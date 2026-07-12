@@ -2,7 +2,11 @@
 
 import pytest
 
-from aioacaia.scale import AcaiaScale
+from aioacaia.exceptions import (
+    AcaiaMessageError,
+    AcaiaMessageTooLong,
+    AcaiaMessageTooShort,
+)
 from aioacaia.messages import (
     ButtonMessage,
     ButtonType,
@@ -11,11 +15,7 @@ from aioacaia.messages import (
     WeightMessage,
 )
 from aioacaia.parser import decode
-from aioacaia.exceptions import (
-    AcaiaMessageError,
-    AcaiaMessageTooLong,
-    AcaiaMessageTooShort,
-)
+from aioacaia.scale import AcaiaScale
 from tests.fixtures import messages as m
 
 
@@ -52,8 +52,8 @@ def test_decode_weight(raw, expected):
 
 
 def test_decode_weight_invalid_unit_raises():
-    """An out-of-range unit byte raises ValueError."""
-    with pytest.raises(ValueError):
+    """An out-of-range unit byte raises a message error."""
+    with pytest.raises(AcaiaMessageError, match="Unknown weight unit"):
         decode(bytearray(m.WEIGHT_BAD_UNIT))
 
 
@@ -107,6 +107,18 @@ def test_decode_unknown_type_raises():
     """An unknown message type raises AcaiaMessageError."""
     with pytest.raises(AcaiaMessageError):
         decode(bytearray(m.UNKNOWN_TYPE))
+
+
+def test_decode_invalid_checksum_raises():
+    """A frame with a mismatched checksum is rejected."""
+    with pytest.raises(AcaiaMessageError, match="checksum"):
+        decode(bytearray(m.BAD_CHECKSUM))
+
+
+def test_decode_short_weight_payload_raises_message_error():
+    """A valid frame with an undersized weight payload is rejected cleanly."""
+    with pytest.raises(AcaiaMessageError, match="Weight payload is too short"):
+        decode(bytearray(m.SHORT_WEIGHT))
 
 
 @pytest.mark.parametrize(
@@ -185,3 +197,47 @@ async def test_scale_reassembles_split_notifications():
 
     await scale.on_bluetooth_data_received(None, bytearray(m.SPLIT_REMAINDER))
     assert scale.weight == pytest.approx(175.9)
+
+
+@pytest.mark.parametrize("split_at", range(1, len(m.WEIGHT)))
+async def test_scale_reassembles_notifications_split_at_any_byte(split_at):
+    """The scale retains partial headers and partial message bodies."""
+    scale = AcaiaScale("aa:bb:cc:dd:ee:ff")
+
+    await scale.on_bluetooth_data_received(None, bytearray(m.WEIGHT[:split_at]))
+    assert scale.weight is None
+
+    await scale.on_bluetooth_data_received(None, bytearray(m.WEIGHT[split_at:]))
+    assert scale.weight == pytest.approx(175.9)
+
+
+async def test_scale_processes_all_messages_in_one_notification():
+    """Coalesced frames are all applied instead of dropping the trailing frame."""
+    scale = AcaiaScale("aa:bb:cc:dd:ee:ff")
+
+    await scale.on_bluetooth_data_received(None, bytearray(m.TWO_MESSAGES))
+
+    assert scale.weight == pytest.approx(175.9)
+    assert scale.device_state is not None
+    assert scale.device_state.battery_level == 93
+
+
+async def test_scale_recovers_from_incomplete_frame_before_valid_frame():
+    """A corrupt length does not pin valid data behind the incomplete frame."""
+    scale = AcaiaScale("aa:bb:cc:dd:ee:ff")
+
+    await scale.on_bluetooth_data_received(None, bytearray(m.TOO_LONG + m.WEIGHT))
+
+    assert scale.weight == pytest.approx(175.9)
+    assert scale._last_short_msg is None
+
+
+async def test_scale_does_not_resync_to_header_inside_fragmented_payload():
+    """Header bytes inside an incomplete payload remain part of that frame."""
+    scale = AcaiaScale("aa:bb:cc:dd:ee:ff")
+    raw = m.WEIGHT_WITH_EMBEDDED_HEADER
+
+    await scale.on_bluetooth_data_received(None, bytearray(raw[:7]))
+    await scale.on_bluetooth_data_received(None, bytearray(raw[7:]))
+
+    assert scale.weight == pytest.approx(5681.5)

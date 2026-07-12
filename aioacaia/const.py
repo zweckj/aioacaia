@@ -1,7 +1,7 @@
 """Constants for aioacaia."""
 
-from typing import Final
 from enum import StrEnum
+from typing import Final
 
 DEFAULT_CHAR_ID: Final = "49535343-8841-43f4-a8d4-ecbe34729bb3"
 NOTIFY_CHAR_ID: Final = "49535343-1e4d-4bd9-ba61-23c647249616"

@@ -2,7 +2,8 @@
 
 import logging
 
-from bleak import BleakClient, BleakScanner, BLEDevice
+from bleak import BleakClient, BleakScanner
+from bleak.backends.device import BLEDevice
 from bleak.exc import BleakDeviceNotFoundError, BleakError
 
 from .const import DEFAULT_CHAR_ID, OLD_STYLE_CHAR_ID, SCALE_START_NAMES
@@ -30,7 +31,7 @@ async def scan(scanner: BleakScanner, timeout: float) -> list[str]:
         if device.name and any(
             device.name.startswith(name) for name in SCALE_START_NAMES
         ):
-            print(device.name, device.address)
+            _LOGGER.debug("Found Acaia device %s (%s)", device.name, device.address)
             addresses.append(device.address)
     return addresses
 
@@ -44,7 +45,7 @@ async def is_new_scale(address_or_ble_device: str | BLEDevice) -> bool:
             ]
     except BleakDeviceNotFoundError as ex:
         raise AcaiaDeviceNotFound("Device not found") from ex
-    except (BleakError, Exception) as ex:
+    except (BleakError, TimeoutError) as ex:
         raise AcaiaError(ex) from ex
 
     if OLD_STYLE_CHAR_ID in characteristics:

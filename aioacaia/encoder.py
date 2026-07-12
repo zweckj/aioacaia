@@ -25,11 +25,13 @@ def encode_id(is_pyxis_style: bool = False) -> bytes:
 
 def encode_notification_request() -> bytes:
     """Encode the request subscribing to weight, battery, timer and key events."""
+    # fmt: off
     register = (
         0, 1,  # weight
         1, 2,  # battery
         2, 5,  # timer (number of heartbeats between timer messages)
         3, 4,  # key / settings
     )
+    # fmt: on
     payload = [len(register) + 1, *register]
     return encode(12, payload)

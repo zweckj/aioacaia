@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Final
 
-from bleak import BleakGATTCharacteristic
+from bleak.backends.characteristic import BleakGATTCharacteristic
 
 from .const import HEADER1, HEADER2
 from .exceptions import AcaiaMessageError, AcaiaMessageTooLong, AcaiaMessageTooShort
@@ -47,12 +47,25 @@ class MessageType(IntEnum):
     HEARTBEAT = 11
 
 
+def _require_payload_length(
+    payload: bytearray | list[int], minimum: int, message_name: str
+) -> None:
+    """Reject payloads that cannot contain the requested message."""
+    if len(payload) < minimum:
+        raise AcaiaMessageError(
+            bytearray(payload), f"{message_name} payload is too short"
+        )
+
+
 def decode_weight(weight_payload: bytearray | list[int]) -> float:
     """Decode a weight in grams from a payload."""
+    _require_payload_length(weight_payload, 6, "Weight")
     value: float = ((weight_payload[1] & 0xFF) << 8) + (weight_payload[0] & 0xFF)
     unit = weight_payload[4] & 0xFF
     if unit not in _WEIGHT_UNIT_DIVISORS:
-        raise ValueError(f"unit value not in range {unit}")
+        raise AcaiaMessageError(
+            bytearray(weight_payload), f"Unknown weight unit {unit}"
+        )
     value /= _WEIGHT_UNIT_DIVISORS[unit]
     if weight_payload[5] & 0x02:
         value *= -1
@@ -61,6 +74,7 @@ def decode_weight(weight_payload: bytearray | list[int]) -> float:
 
 def decode_time(time_payload: bytearray | list[int]) -> float:
     """Decode a time in seconds from a payload."""
+    _require_payload_length(time_payload, 3, "Timer")
     minutes = (time_payload[0] & 0xFF) * 60
     return minutes + time_payload[1] + time_payload[2] / 10.0
 
@@ -91,6 +105,7 @@ _BUTTON_EVENTS: Final[dict[tuple[int, int], _ButtonEvent]] = {
 
 def _parse_button(payload: bytearray | list[int]) -> ButtonMessage:
     """Decode a button notification payload."""
+    _require_payload_length(payload, 2, "Button")
     event = _BUTTON_EVENTS.get((payload[0], payload[1]))
     if event is None:
         _LOGGER.debug("Unknown button, full payload: %s", payload)
@@ -109,6 +124,7 @@ def _parse_heartbeat(
     payload: bytearray | list[int],
 ) -> WeightMessage | TimerMessage | None:
     """Decode the weight or timer wrapped in a heartbeat response."""
+    _require_payload_length(payload, 3, "Heartbeat")
     inner_type = payload[2]
     if inner_type == MessageType.WEIGHT:
         return WeightMessage(decode_weight(payload[3:]))
@@ -119,6 +135,7 @@ def _parse_heartbeat(
 
 def _parse_settings(payload: bytearray) -> Settings:
     """Decode a settings payload."""
+    _require_payload_length(payload, 7, "Settings")
     settings = Settings(
         battery=payload[1] & 0x7F,
         units="ounces" if payload[2] == 5 else "grams",
@@ -151,6 +168,17 @@ def _parse_message(
     raise AcaiaMessageError(bytearray(payload), "Unknown message type")
 
 
+def _validate_checksum(byte_msg: bytearray, start: int, msg_end: int) -> None:
+    """Validate the even and odd checksums at the end of a frame."""
+    body = byte_msg[start + _LENGTH_OFFSET : msg_end - 2]
+    expected_even = sum(body[0::2]) & 0xFF
+    expected_odd = sum(body[1::2]) & 0xFF
+    if byte_msg[msg_end - 2 : msg_end] != bytearray((expected_even, expected_odd)):
+        raise AcaiaMessageError(
+            byte_msg[start:msg_end], "Message checksum does not match"
+        )
+
+
 def decode(byte_msg: bytearray) -> tuple[ScaleMessage | Settings | None, bytearray]:
     """Decode one message, returning it (or None) and any remaining bytes."""
     # Frame layout: HEADER1, HEADER2, command, length, payload..., checksum, checksum
@@ -165,16 +193,24 @@ def decode(byte_msg: bytearray) -> tuple[ScaleMessage | Settings | None, bytearr
     if start > 0:
         _LOGGER.debug("Ignoring %s bytes before header", start)
 
+    _validate_checksum(byte_msg, start, msg_end)
+
     command = byte_msg[start + _COMMAND_OFFSET]
     remaining = byte_msg[msg_end:]
 
     if command == _EVENT_COMMAND:
+        if byte_msg[start + _LENGTH_OFFSET] < 2:
+            raise AcaiaMessageError(
+                byte_msg[start:msg_end], "Event payload is too short"
+            )
         msg_type = byte_msg[start + _MESSAGE_TYPE_OFFSET]
-        payload = byte_msg[start + _PAYLOAD_OFFSET : msg_end]
+        payload = byte_msg[start + _PAYLOAD_OFFSET : msg_end - 2]
         return _parse_message(msg_type, payload), remaining
 
     if command == _SETTINGS_COMMAND:
-        return _parse_settings(byte_msg[start + _LENGTH_OFFSET : msg_end]), remaining
+        return _parse_settings(
+            byte_msg[start + _LENGTH_OFFSET : msg_end - 2]
+        ), remaining
 
     _LOGGER.debug(
         "Non event notification message command %s: %s",
@@ -188,7 +224,7 @@ def notification_handler(_: BleakGATTCharacteristic, data: bytearray) -> None:
     """Sample for callback for handling incoming notifications from the scale."""
     msg = decode(data)[0]
     if isinstance(msg, Settings):
-        print(f"Battery: {msg.battery}")
-        print(f"Units: {msg.units}")
+        _LOGGER.info("Battery: %s", msg.battery)
+        _LOGGER.info("Units: %s", msg.units)
     elif isinstance(msg, WeightMessage):
-        print(f"Weight: {msg.weight}")
+        _LOGGER.info("Weight: %s", msg.weight)
