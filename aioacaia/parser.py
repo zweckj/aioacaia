@@ -174,7 +174,7 @@ def decode(byte_msg: bytearray) -> tuple[ScaleMessage | Settings | None, bytearr
         return _parse_message(msg_type, payload), remaining
 
     if command == _SETTINGS_COMMAND:
-        return _parse_settings(byte_msg[start + _LENGTH_OFFSET :]), remaining
+        return _parse_settings(byte_msg[start + _LENGTH_OFFSET : msg_end]), remaining
 
     _LOGGER.debug(
         "Non event notification message command %s: %s",
