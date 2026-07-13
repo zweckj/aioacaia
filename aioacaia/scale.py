@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 
 from bleak import BleakClient, BleakScanner
@@ -22,6 +22,7 @@ from .const import (
     HEARTBEAT_INTERVAL,
     NOTIFY_CHAR_ID,
     OLD_STYLE_CHAR_ID,
+    Command,
     UnitMass,
 )
 from .discovery import derive_model_name
@@ -36,6 +37,7 @@ from .exceptions import (
 from .messages import (
     ButtonMessage,
     ButtonType,
+    ScaleMessage,
     Settings,
     TimerMessage,
     WeightMessage,
@@ -43,6 +45,8 @@ from .messages import (
 from .parser import decode
 
 _LOGGER = logging.getLogger(__name__)
+
+_HEADER = bytes((HEADER1, HEADER2))
 
 
 @dataclass(kw_only=True, slots=True)
@@ -62,13 +66,13 @@ class AcaiaScale:
     _notify_char_id = NOTIFY_CHAR_ID
 
     _msg_types = {
-        "tare": encode(4, [0]),
-        "startTimer": encode(13, [0, 0]),
-        "stopTimer": encode(13, [0, 2]),
-        "resetTimer": encode(13, [0, 1]),
-        "heartbeat": encode(0, [2, 0]),
-        "getSettings": encode(6, [0] * 16),
-        "notificationRequest": encode_notification_request(),
+        Command.TARE: encode(4, [0]),
+        Command.START_TIMER: encode(13, [0, 0]),
+        Command.STOP_TIMER: encode(13, [0, 2]),
+        Command.RESET_TIMER: encode(13, [0, 1]),
+        Command.HEARTBEAT: encode(0, [2, 0]),
+        Command.GET_SETTINGS: encode(6, [0] * 16),
+        Command.NOTIFICATION_REQUEST: encode_notification_request(),
     }
 
     def __init__(
@@ -119,7 +123,7 @@ class AcaiaScale:
         self._last_short_msg: bytearray | None = None
 
         self._msg_types = self._msg_types.copy()
-        self._msg_types["auth"] = encode_id(is_pyxis_style=is_new_style_scale)
+        self._msg_types[Command.AUTH] = encode_id(is_pyxis_style=is_new_style_scale)
 
         if not is_new_style_scale:
             # for old style scales, the default char id is the same as the notify char id
@@ -358,10 +362,10 @@ class AcaiaScale:
                 callback=callback,
             )
             await asyncio.sleep(0.1)
-            await self._write_msg(self._default_char_id, self._msg_types["auth"])
+            await self._write_msg(self._default_char_id, self._msg_types[Command.AUTH])
             await asyncio.sleep(0.1)
             await self._write_msg(
-                self._default_char_id, self._msg_types["notificationRequest"]
+                self._default_char_id, self._msg_types[Command.NOTIFICATION_REQUEST]
             )
         except asyncio.CancelledError:
             await self._disconnect_client()
@@ -392,16 +396,27 @@ class AcaiaScale:
         if not self.process_queue_task or self.process_queue_task.done():
             self.process_queue_task = asyncio.create_task(self.process_queue())
 
+    def _command(self, msg_type: Command) -> tuple[str, bytes]:
+        """Build a (characteristic, payload) command tuple."""
+        return (self._default_char_id, self._msg_types[msg_type])
+
+    async def _enqueue_command(self, msg_type: Command) -> None:
+        """Queue a single command, serialising access with the queue lock."""
+        async with self._add_to_queue_lock:
+            await self._queue.put(self._command(msg_type))
+
+    async def _ensure_connected(self) -> None:
+        """Connect on demand before sending a command."""
+        if not self.connected:
+            await self.connect()
+
     async def auth(self) -> None:
         """Send auth message to scale, if subscribed to notifications returns Settings object"""
-        await self._queue.put((self._default_char_id, self._msg_types["auth"]))
+        await self._enqueue_command(Command.AUTH)
 
     async def send_weight_notification_request(self) -> None:
         """Tell the scale to send weight notifications"""
-
-        await self._queue.put(
-            (self._default_char_id, self._msg_types["notificationRequest"])
-        )
+        await self._enqueue_command(Command.NOTIFICATION_REQUEST)
 
     async def send_heartbeats(self) -> None:
         """Task to send heartbeats in the background."""
@@ -413,18 +428,10 @@ class AcaiaScale:
                 async with self._add_to_queue_lock:
                     _LOGGER.debug("Sending heartbeat")
                     if self._is_new_style_scale:
-                        await self._queue.put(
-                            (self._default_char_id, self._msg_types["auth"])
-                        )
-
-                    await self._queue.put(
-                        (self._default_char_id, self._msg_types["heartbeat"])
-                    )
-
+                        await self._queue.put(self._command(Command.AUTH))
+                    await self._queue.put(self._command(Command.HEARTBEAT))
                     if self._is_new_style_scale:
-                        await self._queue.put(
-                            (self._default_char_id, self._msg_types["getSettings"])
-                        )
+                        await self._queue.put(self._command(Command.GET_SETTINGS))
                 await asyncio.sleep(
                     HEARTBEAT_INTERVAL if not self._is_new_style_scale else 1,
                 )
@@ -446,57 +453,44 @@ class AcaiaScale:
         await self._disconnect_client()
         _LOGGER.debug("Disconnected from scale")
 
+    def _start_timer(self) -> None:
+        """Start or resume the local timer from any stored elapsed time."""
+        self.timer_running = True
+        if self._timer_start is not None and self._timer_stop is not None:
+            self._timer_start = time.monotonic() - (
+                self._timer_stop - self._timer_start
+            )
+        else:
+            self._timer_start = time.monotonic()
+
     async def tare(self) -> None:
         """Tare the scale."""
-        if not self.connected:
-            await self.connect()
-        async with self._add_to_queue_lock:
-            await self._queue.put((self._default_char_id, self._msg_types["tare"]))
+        await self._ensure_connected()
+        await self._enqueue_command(Command.TARE)
 
     async def start_stop_timer(self) -> None:
         """Start/Stop the timer."""
-        if not self.connected:
-            await self.connect()
+        await self._ensure_connected()
 
         if not self.timer_running:
             _LOGGER.debug('Sending "start" message.')
-
-            async with self._add_to_queue_lock:
-                await self._queue.put(
-                    (self._default_char_id, self._msg_types["startTimer"])
-                )
-            self.timer_running = True
-            if self._timer_start is not None and self._timer_stop is not None:
-                self._timer_start = time.monotonic() - (
-                    self._timer_stop - self._timer_start
-                )
-            else:
-                self._timer_start = time.monotonic()
+            await self._enqueue_command(Command.START_TIMER)
+            self._start_timer()
         else:
             _LOGGER.debug('Sending "stop" message.')
-            async with self._add_to_queue_lock:
-                await self._queue.put(
-                    (self._default_char_id, self._msg_types["stopTimer"])
-                )
+            await self._enqueue_command(Command.STOP_TIMER)
             self.timer_running = False
             self._timer_stop = time.monotonic()
 
     async def reset_timer(self) -> None:
         """Reset the timer."""
-        if not self.connected:
-            await self.connect()
-        async with self._add_to_queue_lock:
-            await self._queue.put(
-                (self._default_char_id, self._msg_types["resetTimer"])
-            )
+        await self._ensure_connected()
+        await self._enqueue_command(Command.RESET_TIMER)
         self._timer_start = None
         self._timer_stop = None
 
         if self.timer_running:
-            async with self._add_to_queue_lock:
-                await self._queue.put(
-                    (self._default_char_id, self._msg_types["startTimer"])
-                )
+            await self._enqueue_command(Command.START_TIMER)
             self._timer_start = time.monotonic()
 
     async def on_bluetooth_data_received(
@@ -504,13 +498,21 @@ class AcaiaScale:
         _: BleakGATTCharacteristic,
         data: bytearray,
     ) -> None:
-        """Receive data from scale."""
+        """Receive data from the scale and update state for each message."""
+        for msg in self._extract_messages(data):
+            self._apply_message(msg)
+            if self._notify_callback is not None:
+                self._notify_callback()
+
+    def _extract_messages(
+        self, data: bytearray
+    ) -> Iterator[ScaleMessage | Settings | None]:
+        """Yield decoded frames from a notification, buffering partial ones."""
         pending = (self._last_short_msg or bytearray()) + data
         self._last_short_msg = None
-        header = bytes((HEADER1, HEADER2))
 
         while pending:
-            start = pending.find(header)
+            start = pending.find(_HEADER)
             if start < 0:
                 if pending[-1] == HEADER1:
                     self._last_short_msg = bytearray((HEADER1,))
@@ -522,55 +524,62 @@ class AcaiaScale:
                 pending = pending[start:]
 
             try:
-                msg, remaining = decode(pending)
+                msg, pending = decode(pending)
             except AcaiaMessageTooShort:
                 self._last_short_msg = pending
                 return
             except AcaiaMessageTooLong:
-                next_start = pending.find(header, 2)
-                while next_start >= 0:
-                    try:
-                        decode(pending[next_start:])
-                    except AcaiaMessageError:
-                        next_start = pending.find(header, next_start + 2)
-                    else:
-                        break
-                if next_start < 0:
-                    self._last_short_msg = pending
+                next_pending = self._skip_to_next_frame(pending)
+                if next_pending is None:
                     return
-                _LOGGER.debug("Discarding incomplete frame before next header")
-                pending = pending[next_start:]
+                pending = next_pending
                 continue
             except AcaiaMessageError as ex:
                 _LOGGER.warning("%s: %s", ex.message, ex.bytes_recvd)
                 pending = pending[2:]
                 continue
 
-            match msg:
-                case Settings():
-                    self._device_state = AcaiaDeviceState(
-                        battery_level=msg.battery,
-                        units=UnitMass(msg.units),
-                        beeps=msg.beep_on,
-                        auto_off_time=msg.auto_off,
-                    )
-                    _LOGGER.debug(
-                        "Got battery level %s, units %s",
-                        str(msg.battery),
-                        str(msg.units),
-                    )
-                case WeightMessage():
-                    self._update_weight(msg.weight)
-                case TimerMessage():
-                    self._update_timer(msg.time)
-                case ButtonMessage():
-                    if msg.weight is not None:
-                        self._update_weight(msg.weight)
-                    self._handle_button(msg.button, msg.timer_running, msg.time)
+            yield msg
 
-            if self._notify_callback is not None:
-                self._notify_callback()
-            pending = remaining
+    def _skip_to_next_frame(self, pending: bytearray) -> bytearray | None:
+        """Advance past an over-long frame to the next decodable header.
+
+        Returns the remaining bytes, or None when no further frame is found and
+        the buffer has been stored for the next notification.
+        """
+        next_start = pending.find(_HEADER, 2)
+        while next_start >= 0:
+            try:
+                decode(pending[next_start:])
+            except AcaiaMessageError:
+                next_start = pending.find(_HEADER, next_start + 2)
+            else:
+                break
+        if next_start < 0:
+            self._last_short_msg = pending
+            return None
+        _LOGGER.debug("Discarding incomplete frame before next header")
+        return pending[next_start:]
+
+    def _apply_message(self, msg: ScaleMessage | Settings | None) -> None:
+        """Update scale state from a single decoded message."""
+        match msg:
+            case Settings():
+                self._device_state = AcaiaDeviceState(
+                    battery_level=msg.battery,
+                    units=UnitMass(msg.units),
+                    beeps=msg.beep_on,
+                    auto_off_time=msg.auto_off,
+                )
+                _LOGGER.debug("Got battery level %s, units %s", msg.battery, msg.units)
+            case WeightMessage():
+                self._update_weight(msg.weight)
+            case TimerMessage():
+                self._update_timer(msg.time)
+            case ButtonMessage():
+                if msg.weight is not None:
+                    self._update_weight(msg.weight)
+                self._handle_button(msg.button, msg.timer_running, msg.time)
 
     def _update_weight(self, weight: float | None) -> None:
         """Store the latest weight and update the flow-rate history."""
@@ -623,13 +632,7 @@ class AcaiaScale:
                 self._button_pressed = True
 
         if button == ButtonType.START:
-            self.timer_running = True
-            if self._timer_start is not None and self._timer_stop is not None:
-                self._timer_start = time.monotonic() - (
-                    self._timer_stop - self._timer_start
-                )
-            else:
-                self._timer_start = time.monotonic()
+            self._start_timer()
             reset_on_power_button()
         elif button == ButtonType.STOP:
             self.timer_running = False
