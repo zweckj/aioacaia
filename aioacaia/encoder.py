@@ -1,6 +1,7 @@
 """Encode outgoing command messages for the scale."""
 
 from collections.abc import Sequence
+from enum import Enum
 from typing import Final
 
 from .const import HEADER1, HEADER2
@@ -35,3 +36,17 @@ def encode_notification_request() -> bytes:
     # fmt: on
     payload = [len(register) + 1, *register]
     return encode(12, payload)
+
+
+class Command(bytes, Enum):
+    """A scale command whose value is its ready-to-send encoded payload."""
+
+    TARE = encode(4, [0])
+    START_TIMER = encode(13, [0, 0])
+    STOP_TIMER = encode(13, [0, 2])
+    RESET_TIMER = encode(13, [0, 1])
+    HEARTBEAT = encode(0, [2, 0])
+    GET_SETTINGS = encode(6, [0] * 16)
+    NOTIFICATION_REQUEST = encode_notification_request()
+    AUTH_CLASSIC = encode_id(is_pyxis_style=False)
+    AUTH_PYXIS = encode_id(is_pyxis_style=True)

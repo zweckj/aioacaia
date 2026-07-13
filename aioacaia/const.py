@@ -17,16 +17,3 @@ class UnitMass(StrEnum):
 
     GRAMS = "grams"
     OUNCES = "ounces"
-
-
-class Command(StrEnum):
-    """Outgoing command message identifiers."""
-
-    AUTH = "auth"
-    TARE = "tare"
-    START_TIMER = "startTimer"
-    STOP_TIMER = "stopTimer"
-    RESET_TIMER = "resetTimer"
-    HEARTBEAT = "heartbeat"
-    GET_SETTINGS = "getSettings"
-    NOTIFICATION_REQUEST = "notificationRequest"

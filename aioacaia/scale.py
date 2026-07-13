@@ -22,11 +22,10 @@ from .const import (
     HEARTBEAT_INTERVAL,
     NOTIFY_CHAR_ID,
     OLD_STYLE_CHAR_ID,
-    Command,
     UnitMass,
 )
 from .discovery import derive_model_name
-from .encoder import encode, encode_id, encode_notification_request
+from .encoder import Command
 from .exceptions import (
     AcaiaDeviceNotFound,
     AcaiaError,
@@ -64,16 +63,6 @@ class AcaiaScale:
 
     _default_char_id = DEFAULT_CHAR_ID
     _notify_char_id = NOTIFY_CHAR_ID
-
-    _msg_types = {
-        Command.TARE: encode(4, [0]),
-        Command.START_TIMER: encode(13, [0, 0]),
-        Command.STOP_TIMER: encode(13, [0, 2]),
-        Command.RESET_TIMER: encode(13, [0, 1]),
-        Command.HEARTBEAT: encode(0, [2, 0]),
-        Command.GET_SETTINGS: encode(6, [0] * 16),
-        Command.NOTIFICATION_REQUEST: encode_notification_request(),
-    }
 
     def __init__(
         self,
@@ -122,8 +111,7 @@ class AcaiaScale:
 
         self._last_short_msg: bytearray | None = None
 
-        self._msg_types = self._msg_types.copy()
-        self._msg_types[Command.AUTH] = encode_id(is_pyxis_style=is_new_style_scale)
+        self._auth = Command.AUTH_PYXIS if is_new_style_scale else Command.AUTH_CLASSIC
 
         if not is_new_style_scale:
             # for old style scales, the default char id is the same as the notify char id
@@ -362,11 +350,9 @@ class AcaiaScale:
                 callback=callback,
             )
             await asyncio.sleep(0.1)
-            await self._write_msg(self._default_char_id, self._msg_types[Command.AUTH])
+            await self._write_msg(self._default_char_id, self._auth)
             await asyncio.sleep(0.1)
-            await self._write_msg(
-                self._default_char_id, self._msg_types[Command.NOTIFICATION_REQUEST]
-            )
+            await self._write_msg(self._default_char_id, Command.NOTIFICATION_REQUEST)
         except asyncio.CancelledError:
             await self._disconnect_client()
             raise
@@ -396,14 +382,14 @@ class AcaiaScale:
         if not self.process_queue_task or self.process_queue_task.done():
             self.process_queue_task = asyncio.create_task(self.process_queue())
 
-    def _command(self, msg_type: Command) -> tuple[str, bytes]:
+    def _command(self, command: Command) -> tuple[str, bytes]:
         """Build a (characteristic, payload) command tuple."""
-        return (self._default_char_id, self._msg_types[msg_type])
+        return (self._default_char_id, command)
 
-    async def _enqueue_command(self, msg_type: Command) -> None:
+    async def _enqueue_command(self, command: Command) -> None:
         """Queue a single command, serialising access with the queue lock."""
         async with self._add_to_queue_lock:
-            await self._queue.put(self._command(msg_type))
+            await self._queue.put(self._command(command))
 
     async def _ensure_connected(self) -> None:
         """Connect on demand before sending a command."""
@@ -412,7 +398,7 @@ class AcaiaScale:
 
     async def auth(self) -> None:
         """Send auth message to scale, if subscribed to notifications returns Settings object"""
-        await self._enqueue_command(Command.AUTH)
+        await self._enqueue_command(self._auth)
 
     async def send_weight_notification_request(self) -> None:
         """Tell the scale to send weight notifications"""
@@ -428,7 +414,7 @@ class AcaiaScale:
                 async with self._add_to_queue_lock:
                     _LOGGER.debug("Sending heartbeat")
                     if self._is_new_style_scale:
-                        await self._queue.put(self._command(Command.AUTH))
+                        await self._queue.put(self._command(self._auth))
                     await self._queue.put(self._command(Command.HEARTBEAT))
                     if self._is_new_style_scale:
                         await self._queue.put(self._command(Command.GET_SETTINGS))

@@ -9,7 +9,7 @@ from bleak.exc import BleakDeviceNotFoundError, BleakError
 
 from aioacaia import scale as scale_module
 from aioacaia.const import UnitMass
-from aioacaia.encoder import encode_id
+from aioacaia.encoder import Command
 from aioacaia.exceptions import AcaiaDeviceNotFound, AcaiaError
 from aioacaia.scale import AcaiaScale
 from tests.fixtures import messages as m
@@ -23,12 +23,12 @@ def _make_scale(**kwargs) -> AcaiaScale:
 
 
 def test_auth_command_is_instance_specific():
-    """Creating another scale does not replace an existing scale's auth."""
+    """Each scale selects the auth command matching its generation."""
     new_style_scale = _make_scale(is_new_style_scale=True)
     old_style_scale = _make_scale(is_new_style_scale=False)
 
-    assert new_style_scale._msg_types["auth"] == encode_id(is_pyxis_style=True)
-    assert old_style_scale._msg_types["auth"] == encode_id(is_pyxis_style=False)
+    assert new_style_scale._auth is Command.AUTH_PYXIS
+    assert old_style_scale._auth is Command.AUTH_CLASSIC
 
 
 async def test_receive_settings_updates_device_state():
@@ -179,7 +179,7 @@ async def test_tare_enqueues_command():
 
     char_id, payload = scale._queue.get_nowait()
     assert char_id == scale._default_char_id
-    assert payload == scale._msg_types["tare"]
+    assert payload == Command.TARE
 
 
 async def test_process_queue_acknowledges_failed_write():
@@ -277,13 +277,13 @@ async def test_start_stop_timer_toggles_state():
     assert scale.timer_running is True
     assert scale._timer_start is not None
     _, payload = scale._queue.get_nowait()
-    assert payload == scale._msg_types["startTimer"]
+    assert payload == Command.START_TIMER
 
     await scale.start_stop_timer()
     assert scale.timer_running is False
     assert scale._timer_stop is not None
     _, payload = scale._queue.get_nowait()
-    assert payload == scale._msg_types["stopTimer"]
+    assert payload == Command.STOP_TIMER
 
 
 async def test_reset_timer_clears_state_and_enqueues():
@@ -298,7 +298,7 @@ async def test_reset_timer_clears_state_and_enqueues():
     assert scale._timer_start is None
     assert scale._timer_stop is None
     _, payload = scale._queue.get_nowait()
-    assert payload == scale._msg_types["resetTimer"]
+    assert payload == Command.RESET_TIMER
 
 
 def test_device_disconnected_handler_resets_state():
