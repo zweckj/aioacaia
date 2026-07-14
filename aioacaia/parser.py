@@ -157,15 +157,17 @@ def _parse_message(
 ) -> ScaleMessage | None:
     """Decode an event notification payload into a message."""
     _LOGGER.debug("Message received: msg_type: %s, payload: %s", msg_type, payload)
-    if msg_type == MessageType.WEIGHT:
-        return WeightMessage(decode_weight(payload))
-    if msg_type == MessageType.TIMER:
-        return TimerMessage(decode_time(payload))
-    if msg_type == MessageType.HEARTBEAT:
-        return _parse_heartbeat(payload)
-    if msg_type == MessageType.BUTTON:
-        return _parse_button(payload)
-    raise AcaiaMessageError(bytearray(payload), "Unknown message type")
+    match msg_type:
+        case MessageType.WEIGHT:
+            return WeightMessage(decode_weight(payload))
+        case MessageType.TIMER:
+            return TimerMessage(decode_time(payload))
+        case MessageType.HEARTBEAT:
+            return _parse_heartbeat(payload)
+        case MessageType.BUTTON:
+            return _parse_button(payload)
+        case _:
+            raise AcaiaMessageError(bytearray(payload), "Unknown message type")
 
 
 def _validate_checksum(byte_msg: bytearray, start: int, msg_end: int) -> None:
@@ -222,9 +224,9 @@ def decode(byte_msg: bytearray) -> tuple[ScaleMessage | Settings | None, bytearr
 
 def notification_handler(_: BleakGATTCharacteristic, data: bytearray) -> None:
     """Sample for callback for handling incoming notifications from the scale."""
-    msg = decode(data)[0]
-    if isinstance(msg, Settings):
-        _LOGGER.info("Battery: %s", msg.battery)
-        _LOGGER.info("Units: %s", msg.units)
-    elif isinstance(msg, WeightMessage):
-        _LOGGER.info("Weight: %s", msg.weight)
+    match decode(data)[0]:
+        case Settings(battery=battery, units=units):
+            _LOGGER.info("Battery: %s", battery)
+            _LOGGER.info("Units: %s", units)
+        case WeightMessage(weight=weight):
+            _LOGGER.info("Weight: %s", weight)
