@@ -47,6 +47,9 @@ _LOGGER = logging.getLogger(__name__)
 
 _HEADER = bytes((HEADER1, HEADER2))
 
+# time to wait after a disconnect before attempting to reconnect, in seconds
+_RECONNECT_DELAY: float = 15.0
+
 
 @dataclass(kw_only=True, slots=True)
 class AcaiaDeviceState:
@@ -152,39 +155,27 @@ class AcaiaScale:
 
     @property
     def flow_rate(self) -> float | None:
-        """Calculate the current flow rate."""
-        flows = []
-
-        if len(self.weight_history) < 4:
+        """Estimate the current flow rate in g/s. Fits a least-squares line through the recent ``(timestamp, weight)``"""
+        history = list(self.weight_history)
+        if len(history) < 4:
             return None
 
-        # Calculate flow rates using 3 readings ago
-        for i in range(3, len(self.weight_history)):
-            prev_time, prev_weight = self.weight_history[i - 3]
-            curr_time, curr_weight = self.weight_history[i]
+        n = len(history)
+        mean_time = sum(t for t, _ in history) / n
+        mean_weight = sum(w for _, w in history) / n
 
-            time_diff = curr_time - prev_time
-            weight_diff = curr_weight - prev_weight
-
-            # Validate weight difference and flow rate limits
-            if time_diff <= 0:
-                continue
-            flow = weight_diff / time_diff
-            if 0 <= flow <= 20.0:  # Flow rate limit
-                flows.append(flow)
-
-        if not flows:
+        # Least-squares slope = cov(time, weight) / var(time).
+        covariance = sum((t - mean_time) * (w - mean_weight) for t, w in history)
+        variance = sum((t - mean_time) ** 2 for t, _ in history)
+        if variance <= 0:
             return None
 
-        # Compute the Exponential Moving Average (EMA)
-        alpha = 2 / (len(flows) + 1)  # EMA weighting factor
-        ema = flows[0]  # Initialize EMA with the first flow rate
+        flow = covariance / variance
+        if not 0 <= flow <= 20.0:  # Flow rate limit
+            return None
 
-        for flow in flows[1:]:
-            ema = alpha * flow + (1 - alpha) * ema
-
-        _LOGGER.debug("Flow rate: %.2f g/s", ema)
-        return ema
+        _LOGGER.debug("Flow rate: %.2f g/s", flow)
+        return flow
 
     def device_disconnected_handler(
         self,
@@ -212,7 +203,6 @@ class AcaiaScale:
             raise AcaiaError("Client not initialized")
         try:
             await self._client.write_gatt_char(char_id, payload)
-            self._timestamp_last_command = time.time()
         except BleakDeviceNotFoundError as ex:
             self.connected = False
             raise AcaiaDeviceNotFound("Device not found") from ex
@@ -225,6 +215,7 @@ class AcaiaScale:
         except Exception as ex:
             self.connected = False
             raise AcaiaError("Unknown error writing to device") from ex
+        self._timestamp_last_command = time.time()
 
     def _drain_queue(self) -> None:
         """Discard and acknowledge all queued commands."""
@@ -296,7 +287,7 @@ class AcaiaScale:
             return
 
         if self.last_disconnect_time:
-            reconnect_delay = 15 - (time.time() - self.last_disconnect_time)
+            reconnect_delay = _RECONNECT_DELAY - (time.time() - self.last_disconnect_time)
         else:
             reconnect_delay = 0
         if reconnect_delay > 0:
@@ -345,29 +336,28 @@ class AcaiaScale:
         if callback is None:
             callback = self.on_bluetooth_data_received
         try:
-            await client.start_notify(
-                char_specifier=self._notify_char_id,
-                callback=callback,
-            )
-            await asyncio.sleep(0.1)
-            await self._write_msg(self._default_char_id, self._auth)
-            await asyncio.sleep(0.1)
-            await self._write_msg(self._default_char_id, Command.NOTIFICATION_REQUEST)
-        except asyncio.CancelledError:
+            try:
+                await client.start_notify(
+                    char_specifier=self._notify_char_id,
+                    callback=callback,
+                )
+                await asyncio.sleep(0.1)
+                await self._write_msg(self._default_char_id, self._auth)
+                await asyncio.sleep(0.1)
+                await self._write_msg(
+                    self._default_char_id, Command.NOTIFICATION_REQUEST
+                )
+            except BleakDeviceNotFoundError as ex:
+                raise AcaiaDeviceNotFound("Device not found") from ex
+            except AcaiaError:
+                raise
+            except BleakError as ex:
+                raise AcaiaError("Error setting up connection") from ex
+            except TimeoutError as ex:
+                raise AcaiaError("Timeout setting up connection") from ex
+        except (Exception, asyncio.CancelledError):
             await self._disconnect_client()
             raise
-        except BleakDeviceNotFoundError as ex:
-            await self._disconnect_client()
-            raise AcaiaDeviceNotFound("Device not found") from ex
-        except AcaiaError:
-            await self._disconnect_client()
-            raise
-        except BleakError as ex:
-            await self._disconnect_client()
-            raise AcaiaError("Error setting up connection") from ex
-        except TimeoutError as ex:
-            await self._disconnect_client()
-            raise AcaiaError("Timeout setting up connection") from ex
 
         self.connected = True
         _LOGGER.debug("Connected to Acaia scale")
@@ -407,10 +397,9 @@ class AcaiaScale:
     async def send_heartbeats(self) -> None:
         """Task to send heartbeats in the background."""
         while True:
+            if not self.connected:
+                return
             try:
-                if not self.connected:
-                    return
-
                 async with self._add_to_queue_lock:
                     _LOGGER.debug("Sending heartbeat")
                     if self._is_new_style_scale:
@@ -418,13 +407,12 @@ class AcaiaScale:
                     await self._queue.put(self._command(Command.HEARTBEAT))
                     if self._is_new_style_scale:
                         await self._queue.put(self._command(Command.GET_SETTINGS))
-                await asyncio.sleep(
-                    HEARTBEAT_INTERVAL if not self._is_new_style_scale else 1,
-                )
             except asyncio.CancelledError:
                 self.connected = False
                 return
-
+            await asyncio.sleep(
+                    HEARTBEAT_INTERVAL if not self._is_new_style_scale else 1,
+            )
     async def disconnect(self) -> None:
         """Clean disconnect from the scale"""
 
