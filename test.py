@@ -163,7 +163,7 @@ def annotate_chain(chain: bytes) -> ChainReport:
             report.lines.append(flag + "   <-- CHECK")
             report.flags.append(flag)
             break
-        body = bytes(chain[index + 1 : index + 1 + width])
+        body = bytearray(chain[index + 1 : index + 1 + width])
         if len(body) < width:
             flag = (
                 f"[{index}] tag 0x{tag:02x} {name} needs {width} bytes, "

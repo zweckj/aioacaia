@@ -1,6 +1,6 @@
 [project]
 name = "aioacaia"
-version = "0.2.0"
+version = "0.2.1"
 license = "MIT"
 description = "Python library to interact with acaia Bluetooth scales."
 readme = "README.md"
@@ -33,6 +33,7 @@ Documentation = "https://github.com/zweckj/aioacaia"
 dev = [
     "covdefaults == 2.3.0",
     "coverage == 7.6.7",
+    "mypy == 2.3.0",
     "syrupy == 4.7.2",
     "pytest == 8.3.3",
     "pytest-asyncio == 0.24.0",
