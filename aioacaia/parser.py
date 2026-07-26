@@ -161,17 +161,18 @@ def _parse_heartbeat(
 ) -> ScaleMessage | None:
     """Decode whatever a heartbeat response wraps.
 
-    The wrapper is simply the first record in the chain, so a nested button —
-    which the scale does send — decodes like any other.
+    The wrapper is simply the first record, identified by its tag at
+    ``payload[2]``: a nested button — which the scale does send — decodes as a
+    press, otherwise the wrapped weight or timer is decoded directly.
     """
     _require_payload_length(payload, 3, "Heartbeat")
-    if payload[2] == MessageType.BUTTON:
+    inner_tag = payload[2]
+    if inner_tag == MessageType.BUTTON:
         return _parse_button(payload[3:])
-    records = _walk_records(payload[2:])
-    if records.time is not None:
-        return TimerMessage(records.time)
-    if records.weight is not None:
-        return WeightMessage(records.weight)
+    if inner_tag == MessageType.WEIGHT:
+        return WeightMessage(decode_weight(payload[3:]))
+    if inner_tag == MessageType.TIMER:
+        return TimerMessage(decode_time(payload[3:]))
     return None
 
 
