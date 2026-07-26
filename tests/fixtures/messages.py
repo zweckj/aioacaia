@@ -40,20 +40,39 @@ TIMER = frame(7, _TIME)  # -> 90.5
 HEARTBEAT_WEIGHT = frame(11, bytes([0x00, 0x00, 0x05]) + _WEIGHT)  # value 175.9
 HEARTBEAT_TIME = frame(11, bytes([0x00, 0x00, 0x07]) + _TIME)  # time 90.5
 
-# --- Button (msg_type 8), one per (payload[0], payload[1]) branch ---
-# For stop/reset-with-weight the time occupies payload[2:6] but is decoded from
-# the first 3 of those bytes, and the weight follows at payload[6:].
-_TIME_FIELD = _TIME + bytes([0x00])
+# --- Button (msg_type 8) ---
+# A press is a key code followed by the ordinary record chain, so the byte
+# after the 3 time bytes is not padding — it is the tag introducing the weight
+# record that follows.
+_TIME_FIELD = _TIME + bytes([0x05])
 BUTTON_TARE = frame(8, bytes([0, 5]) + _WEIGHT)
 BUTTON_START_WEIGHT = frame(8, bytes([8, 5]) + _WEIGHT)
 BUTTON_START = frame(8, bytes([8, 11]))
 BUTTON_STOP_TIME_WEIGHT = frame(8, bytes([10, 7]) + _TIME_FIELD + _WEIGHT)
-BUTTON_STOP_TIME = frame(8, bytes([10, 5]) + _TIME)
+BUTTON_STOP_TIME = frame(8, bytes([10, 7]) + _TIME)
 BUTTON_STOP = frame(8, bytes([10, 13]))
 BUTTON_RESET_TIME_WEIGHT = frame(8, bytes([9, 7]) + _TIME_FIELD + _WEIGHT)
-BUTTON_RESET_TIME = frame(8, bytes([9, 5]) + _TIME)
+BUTTON_RESET_TIME = frame(8, bytes([9, 7]) + _TIME)
 BUTTON_RESET = frame(8, bytes([9, 12]))
+BUTTON_STOP_WEIGHT = frame(8, bytes([10, 5]) + _WEIGHT)
+BUTTON_RESET_WEIGHT = frame(8, bytes([9, 5]) + _WEIGHT)
 BUTTON_UNKNOWN = frame(8, bytes([7, 7]))
+
+# Verbatim captures from a PEARL-244684 (original Pearl). Elapsed times were
+# cross-checked against wall clock, so these are ground truth rather than
+# frames built to match the parser.
+REAL_STOP_WEIGHT_TIME = frame(  # 55.1 g, 9.7 s
+    8, bytes.fromhex("0a05270200000101 07000907".replace(" ", ""))
+)
+REAL_START_BEHIND_TAG_0B = frame(  # 54.9 g, behind a 0b record
+    8, bytes.fromhex("080b00e005250200000101")
+)
+REAL_RESET_BEHIND_TAG_0B = frame(  # 0 g, behind a 0b record
+    8, bytes.fromhex("090b00e005000000000101")
+)
+REAL_HEARTBEAT_WRAPPED_START = frame(  # a start press nested in a heartbeat
+    11, bytes.fromhex("00e00808050000000001 01".replace(" ", ""))
+)
 
 # --- Unknown msg_type ---
 UNKNOWN_TYPE = frame(99, bytes([0, 0]))

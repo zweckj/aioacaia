@@ -34,6 +34,10 @@ _PAYLOAD_OFFSET: Final = 5
 # Non-payload bytes not counted by the length byte: 2 headers + command + 2 checksum.
 _FRAME_OVERHEAD: Final = 5
 
+# Record tags that carry no message of their own.
+_BATTERY_TAG: Final = 6
+_UNKNOWN_TAG_0B: Final = 11
+
 # Divisor applied to a raw weight value, keyed by the unit byte.
 _WEIGHT_UNIT_DIVISORS: Final = {1: 10.0, 2: 100.0, 3: 1000.0, 4: 10000.0}
 
@@ -79,57 +83,95 @@ def decode_time(time_payload: bytearray | list[int]) -> float:
     return minutes + time_payload[1] + time_payload[2] / 10.0
 
 
-@dataclass(frozen=True)
-class _ButtonEvent:
-    """How to decode a button notification payload."""
-
-    button: ButtonType
-    timer_running: bool | None = None
-    time_at: int | None = None
-    weight_at: int | None = None
-
-
-# Button events keyed by (payload[0], payload[1]).
-_BUTTON_EVENTS: Final[dict[tuple[int, int], _ButtonEvent]] = {
-    (0, 5): _ButtonEvent(ButtonType.TARE, weight_at=2),
-    (8, 5): _ButtonEvent(ButtonType.START, timer_running=True, weight_at=2),
-    (8, 11): _ButtonEvent(ButtonType.START, timer_running=True),
-    (10, 7): _ButtonEvent(ButtonType.STOP, timer_running=False, time_at=2, weight_at=6),
-    (10, 5): _ButtonEvent(ButtonType.STOP, timer_running=False, time_at=2),
-    (10, 13): _ButtonEvent(ButtonType.STOP, timer_running=False),
-    (9, 7): _ButtonEvent(ButtonType.RESET, time_at=2, weight_at=6),
-    (9, 5): _ButtonEvent(ButtonType.RESET, time_at=2),
-    (9, 12): _ButtonEvent(ButtonType.RESET),
+# Record tags and the fixed width of each record's body. Everything the scale
+# reports in an event payload is a chain of [tag][body] records running to the
+# end of the frame, so the same walk decodes a button's attached fields and a
+# heartbeat's wrapped payload. Tag 0x0b is unexplained (a constant 00 e0) but
+# its width has to be right or the rest of the chain is lost behind it.
+_RECORD_WIDTHS: Final[dict[int, int]] = {
+    MessageType.WEIGHT: 6,
+    _BATTERY_TAG: 1,
+    MessageType.TIMER: 3,
+    _UNKNOWN_TAG_0B: 2,
 }
+
+# Buttons keyed by key code alone; what follows is the ordinary record chain.
+_BUTTON_TYPES: Final[dict[int, tuple[ButtonType, bool | None]]] = {
+    0: (ButtonType.TARE, None),
+    8: (ButtonType.START, True),
+    9: (ButtonType.RESET, None),
+    10: (ButtonType.STOP, False),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _Records:
+    """Fields collected from one record chain."""
+
+    key: int | None = None
+    weight: float | None = None
+    time: float | None = None
+
+
+def _walk_records(payload: bytearray | list[int]) -> _Records:
+    """Walk a [tag][body] chain, collecting the fields it carries.
+
+    An unrecognised tag makes everything behind it unreadable, so the walk
+    stops there rather than guessing at offsets. A known tag whose body is cut
+    short by the end of the frame is a fragment, not vocabulary — also stop.
+    """
+    key = weight = time = None
+    index = 0
+    while index < len(payload):
+        tag = payload[index]
+        if tag == MessageType.BUTTON:
+            if index + 2 > len(payload):
+                break
+            key = payload[index + 1]
+            index += 2
+            continue
+        width = _RECORD_WIDTHS.get(tag)
+        if width is None:
+            _LOGGER.debug("Unknown record tag %s in payload: %s", tag, payload)
+            break
+        body = payload[index + 1 : index + 1 + width]
+        if len(body) < width:
+            break
+        if tag == MessageType.WEIGHT:
+            weight = decode_weight(body)
+        elif tag == MessageType.TIMER:
+            time = decode_time(body)
+        index += 1 + width
+    return _Records(key, weight, time)
 
 
 def _parse_button(payload: bytearray | list[int]) -> ButtonMessage:
     """Decode a button notification payload."""
-    _require_payload_length(payload, 2, "Button")
-    event = _BUTTON_EVENTS.get((payload[0], payload[1]))
-    if event is None:
+    _require_payload_length(payload, 1, "Button")
+    records = _walk_records([MessageType.BUTTON, *payload])
+    if records.key not in _BUTTON_TYPES:
         _LOGGER.debug("Unknown button, full payload: %s", payload)
         return ButtonMessage(ButtonType.UNKNOWN)
-
-    time = decode_time(payload[event.time_at :]) if event.time_at is not None else None
-    weight = (
-        decode_weight(payload[event.weight_at :])
-        if event.weight_at is not None
-        else None
-    )
-    return ButtonMessage(event.button, event.timer_running, time, weight)
+    button, timer_running = _BUTTON_TYPES[records.key]
+    return ButtonMessage(button, timer_running, records.time, records.weight)
 
 
 def _parse_heartbeat(
     payload: bytearray | list[int],
-) -> WeightMessage | TimerMessage | None:
-    """Decode the weight or timer wrapped in a heartbeat response."""
+) -> ScaleMessage | None:
+    """Decode whatever a heartbeat response wraps.
+
+    The wrapper is simply the first record in the chain, so a nested button —
+    which the scale does send — decodes like any other.
+    """
     _require_payload_length(payload, 3, "Heartbeat")
-    inner_type = payload[2]
-    if inner_type == MessageType.WEIGHT:
-        return WeightMessage(decode_weight(payload[3:]))
-    if inner_type == MessageType.TIMER:
-        return TimerMessage(decode_time(payload[3:]))
+    if payload[2] == MessageType.BUTTON:
+        return _parse_button(payload[3:])
+    records = _walk_records(payload[2:])
+    if records.time is not None:
+        return TimerMessage(records.time)
+    if records.weight is not None:
+        return WeightMessage(records.weight)
     return None
 
 
