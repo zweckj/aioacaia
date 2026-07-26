@@ -39,6 +39,11 @@ TIMER = frame(7, _TIME)  # -> 90.5
 # --- Heartbeat (msg_type 11) wrapping a weight or timer payload ---
 HEARTBEAT_WEIGHT = frame(11, bytes([0x00, 0x00, 0x05]) + _WEIGHT)  # value 175.9
 HEARTBEAT_TIME = frame(11, bytes([0x00, 0x00, 0x07]) + _TIME)  # time 90.5
+# First wrapped record is a weight, followed by a timer record. The wrapper is
+# the first record, so this must decode to the weight, not the trailing timer.
+HEARTBEAT_WEIGHT_THEN_TIME = frame(
+    11, bytes([0x00, 0x00, 0x05]) + _WEIGHT + bytes([0x07]) + _TIME
+)
 
 # --- Button (msg_type 8) ---
 # A press is a key code followed by the ordinary record chain, so the byte
@@ -47,7 +52,7 @@ HEARTBEAT_TIME = frame(11, bytes([0x00, 0x00, 0x07]) + _TIME)  # time 90.5
 _TIME_FIELD = _TIME + bytes([0x05])
 BUTTON_TARE = frame(8, bytes([0, 5]) + _WEIGHT)
 BUTTON_START_WEIGHT = frame(8, bytes([8, 5]) + _WEIGHT)
-BUTTON_START = frame(8, bytes([8, 11]))
+BUTTON_START = frame(8, bytes([8]))
 BUTTON_STOP_TIME_WEIGHT = frame(8, bytes([10, 7]) + _TIME_FIELD + _WEIGHT)
 BUTTON_STOP_TIME = frame(8, bytes([10, 7]) + _TIME)
 BUTTON_STOP = frame(8, bytes([10, 13]))
@@ -73,6 +78,17 @@ REAL_RESET_BEHIND_TAG_0B = frame(  # 0 g, behind a 0b record
 REAL_HEARTBEAT_WRAPPED_START = frame(  # a start press nested in a heartbeat
     11, bytes.fromhex("00e00808050000000001 01".replace(" ", ""))
 )
+
+# Verbatim captures from a 2021+ new-style scale. On this firmware a start or
+# reset press is a bare key code with no trailing records — notably no tag 0x0b —
+# while a stop still carries a weight then a time record, the same layout as the
+# original Pearl. The stop time was cross-checked against the wall clock
+# (10.8 s decoded vs 10.6 s measured).
+REAL_2021_START = frame(8, bytes.fromhex("08"))  # start, timer running
+REAL_2021_STOP_WEIGHT_TIME = frame(  # stop, 0 g, 10.8 s
+    8, bytes.fromhex("0a0500000000010107000a08")
+)
+REAL_2021_RESET = frame(8, bytes.fromhex("09"))  # reset
 
 # --- Unknown msg_type ---
 UNKNOWN_TYPE = frame(99, bytes([0, 0]))
