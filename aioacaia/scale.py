@@ -287,7 +287,9 @@ class AcaiaScale:
             return
 
         if self.last_disconnect_time:
-            reconnect_delay = _RECONNECT_DELAY - (time.time() - self.last_disconnect_time)
+            reconnect_delay = _RECONNECT_DELAY - (
+                time.time() - self.last_disconnect_time
+            )
         else:
             reconnect_delay = 0
         if reconnect_delay > 0:
@@ -411,8 +413,9 @@ class AcaiaScale:
                 self.connected = False
                 return
             await asyncio.sleep(
-                    HEARTBEAT_INTERVAL if not self._is_new_style_scale else 1,
+                HEARTBEAT_INTERVAL if not self._is_new_style_scale else 1,
             )
+
     async def disconnect(self) -> None:
         """Clean disconnect from the scale"""
 

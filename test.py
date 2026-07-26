@@ -86,7 +86,9 @@ _TAG_NAMES: dict[int, str] = {
     _BATTERY_TAG: "battery",
     _UNKNOWN_TAG_0B: "0x0b (unexplained)",
 }
-_BUTTON_NAMES: dict[int, str] = {code: bt.value for code, (bt, _tr) in _BUTTON_TYPES.items()}
+_BUTTON_NAMES: dict[int, str] = {
+    code: bt.value for code, (bt, _tr) in _BUTTON_TYPES.items()
+}
 
 
 def _msg_type_name(value: int) -> str:
@@ -322,7 +324,8 @@ class CaptureSession:
             mt = consumed[4]
             payload = consumed[5:-2]
             interesting = mt == MessageType.BUTTON or (
-                mt == MessageType.HEARTBEAT and payload[2:3] == bytes([MessageType.BUTTON])
+                mt == MessageType.HEARTBEAT
+                and payload[2:3] == bytes([MessageType.BUTTON])
             )
         level = logging.INFO if interesting else logging.DEBUG
 
@@ -375,9 +378,7 @@ class CaptureSession:
                 self._record_fixture(msg_type, payload, msg, report)
                 self._timer_crosscheck(msg)
 
-    def _emit_records(
-        self, report: ChainReport, level: int, consumed: bytes
-    ) -> None:
+    def _emit_records(self, report: ChainReport, level: int, consumed: bytes) -> None:
         self.log.log(level, "  records:")
         for line in report.lines:
             self.log.log(level, "    %s", line)
