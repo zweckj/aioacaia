@@ -90,6 +90,8 @@ def test_decode_heartbeat_time():
         (m.BUTTON_RESET_TIME_WEIGHT, ButtonType.RESET, None, 90.5, 175.9),
         (m.BUTTON_RESET_TIME, ButtonType.RESET, None, 90.5, None),
         (m.BUTTON_RESET, ButtonType.RESET, None, None, None),
+        (m.BUTTON_STOP_WEIGHT, ButtonType.STOP, False, None, 175.9),
+        (m.BUTTON_RESET_WEIGHT, ButtonType.RESET, None, None, 175.9),
         (m.BUTTON_UNKNOWN, ButtonType.UNKNOWN, None, None, None),
     ],
 )
@@ -241,3 +243,35 @@ async def test_scale_does_not_resync_to_header_inside_fragmented_payload():
     await scale.on_bluetooth_data_received(None, bytearray(raw[7:]))
 
     assert scale.weight == pytest.approx(5681.5)
+
+
+@pytest.mark.parametrize(
+    ("raw", "button", "timer_running", "expected_time", "expected_weight"),
+    [
+        # A stop reporting both weight and the elapsed time behind it. Decoding
+        # the weight record as a time turned 55.1 g into "2342 s" — plausible
+        # enough to go unnoticed, and no exception to catch it.
+        (m.REAL_STOP_WEIGHT_TIME, ButtonType.STOP, False, 9.7, 55.1),
+        # Presses arriving behind a 0b record, which the scale does send.
+        (m.REAL_START_BEHIND_TAG_0B, ButtonType.START, True, None, 54.9),
+        (m.REAL_RESET_BEHIND_TAG_0B, ButtonType.RESET, None, None, 0.0),
+    ],
+)
+def test_decode_button_real_captures(
+    raw, button, timer_running, expected_time, expected_weight
+):
+    """Frames captured verbatim from a PEARL-244684 decode correctly."""
+    msg = _decode_message(raw)
+    assert isinstance(msg, ButtonMessage)
+    assert msg.button is button
+    assert msg.timer_running is timer_running
+    assert msg.time == pytest.approx(expected_time) if expected_time else msg.time is None
+    assert msg.weight == pytest.approx(expected_weight)
+
+
+def test_decode_heartbeat_wrapped_button():
+    """A button nested in a heartbeat is a press, not an undecodable payload."""
+    msg = _decode_message(m.REAL_HEARTBEAT_WRAPPED_START)
+    assert isinstance(msg, ButtonMessage)
+    assert msg.button is ButtonType.START
+    assert msg.timer_running is True
