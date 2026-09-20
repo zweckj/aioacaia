@@ -10,6 +10,9 @@ from bleak.backends.characteristic import BleakGATTCharacteristic
 from .const import HEADER1, HEADER2
 from .exceptions import AcaiaMessageError, AcaiaMessageTooLong, AcaiaMessageTooShort
 from .messages import (
+    AckMessage,
+    AckResultCode,
+    AckResultType,
     ButtonMessage,
     ButtonType,
     ScaleMessage,
@@ -36,7 +39,10 @@ _FRAME_OVERHEAD: Final = 5
 
 # Record tags that carry no message of their own.
 _BATTERY_TAG: Final = 6
-_UNKNOWN_TAG_0B: Final = 11
+# Same tag as MessageType.HEARTBEAT: a 2-byte ack/keep-alive record, see
+# AckMessage. It can appear standalone (a bare heartbeat reply) or piggybacked
+# inside another record chain, e.g. behind a button press.
+_ACK_TAG: Final = 11
 
 # Divisor applied to a raw weight value, keyed by the unit byte.
 _WEIGHT_UNIT_DIVISORS: Final = {1: 10.0, 2: 100.0, 3: 1000.0, 4: 10000.0}
@@ -86,13 +92,14 @@ def decode_time(time_payload: bytearray | list[int]) -> float:
 # Record tags and the fixed width of each record's body. Everything the scale
 # reports in an event payload is a chain of [tag][body] records running to the
 # end of the frame, so the same walk decodes a button's attached fields and a
-# heartbeat's wrapped payload. Tag 0x0b is unexplained (a constant 00 e0) but
-# its width has to be right or the rest of the chain is lost behind it.
+# heartbeat's wrapped payload. The ack tag's body is decoded by _parse_ack when
+# it heads the chain (see _parse_heartbeat); mid-chain it is only skipped, its
+# width still has to be right or the rest of the chain is lost behind it.
 _RECORD_WIDTHS: Final[dict[int, int]] = {
     MessageType.WEIGHT: 6,
     _BATTERY_TAG: 1,
     MessageType.TIMER: 3,
-    _UNKNOWN_TAG_0B: 2,
+    _ACK_TAG: 2,
 }
 
 # Buttons keyed by key code alone; what follows is the ordinary record chain.
@@ -156,16 +163,38 @@ def _parse_button(payload: bytearray | list[int]) -> ButtonMessage:
     return ButtonMessage(button, timer_running, records.time, records.weight)
 
 
+def _parse_ack(payload: bytearray | list[int]) -> AckMessage:
+    """Decode the 2-byte ack/keep-alive record at the start of a payload."""
+    ack_id = payload[0]
+    packed = payload[1]
+    result_type_raw = packed & 0x1F
+    try:
+        result_type = AckResultType(result_type_raw)
+    except ValueError:
+        _LOGGER.debug("Unknown ack result_type %s in payload: %s", result_type_raw, payload)
+        result_type = AckResultType.UNKNOWN
+    return AckMessage(
+        ack_id=ack_id,
+        result_type=result_type,
+        result_value=AckResultCode(packed >> 5),
+    )
+
+
 def _parse_heartbeat(
     payload: bytearray | list[int],
 ) -> ScaleMessage | None:
-    """Decode whatever a heartbeat response wraps.
+    """Decode a heartbeat reply: an ack record, optionally wrapping another.
 
-    The wrapper is simply the first record, identified by its tag at
-    ``payload[2]``: a nested button — which the scale does send — decodes as a
-    press, otherwise the wrapped weight or timer is decoded directly.
+    The first 2 bytes are always the ack record (see ``AckMessage``). A bare
+    heartbeat carries nothing else. Otherwise a nested record follows,
+    identified by its tag at ``payload[2]``: a nested button — which the scale
+    does send — decodes as a press, otherwise the wrapped weight or timer is
+    decoded directly; an unrecognised nested tag falls back to the ack.
     """
-    _require_payload_length(payload, 3, "Heartbeat")
+    _require_payload_length(payload, 2, "Heartbeat")
+    ack = _parse_ack(payload)
+    if len(payload) < 3:
+        return ack
     inner_tag = payload[2]
     if inner_tag == MessageType.BUTTON:
         return _parse_button(payload[3:])
@@ -173,7 +202,7 @@ def _parse_heartbeat(
         return WeightMessage(decode_weight(payload[3:]))
     if inner_tag == MessageType.TIMER:
         return TimerMessage(decode_time(payload[3:]))
-    return None
+    return ack
 
 
 def _parse_settings(payload: bytearray) -> Settings:

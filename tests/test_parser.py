@@ -8,6 +8,9 @@ from aioacaia.exceptions import (
     AcaiaMessageTooShort,
 )
 from aioacaia.messages import (
+    AckMessage,
+    AckResultCode,
+    AckResultType,
     ButtonMessage,
     ButtonType,
     Settings,
@@ -62,6 +65,16 @@ def test_decode_timer():
     msg = _decode_message(m.TIMER)
     assert isinstance(msg, TimerMessage)
     assert msg.time == pytest.approx(90.5)
+
+
+def test_decode_heartbeat_bare_ack():
+    """A bare heartbeat reply (no nested event) decodes to an AckMessage."""
+    msg = _decode_message(m.HEARTBEAT_BARE_ALIVE)
+    assert msg == AckMessage(
+        ack_id=0,
+        result_type=AckResultType.CMD,
+        result_value=AckResultCode.ALIVE_SUCCESS,
+    )
 
 
 def test_decode_heartbeat_weight():

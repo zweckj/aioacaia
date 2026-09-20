@@ -37,6 +37,8 @@ WEIGHT_BAD_UNIT = frame(
 TIMER = frame(7, _TIME)  # -> 90.5
 
 # --- Heartbeat (msg_type 11) wrapping a weight or timer payload ---
+# A bare heartbeat reply: just the 2-byte ack record, no nested event.
+HEARTBEAT_BARE_ALIVE = frame(11, bytes([0x00, 0xE0]))  # ack_id 0, alive_success
 HEARTBEAT_WEIGHT = frame(11, bytes([0x00, 0x00, 0x05]) + _WEIGHT)  # value 175.9
 HEARTBEAT_TIME = frame(11, bytes([0x00, 0x00, 0x07]) + _TIME)  # time 90.5
 # First wrapped record is a weight, followed by a timer record. The wrapper is
