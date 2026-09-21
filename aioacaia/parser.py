@@ -171,7 +171,9 @@ def _parse_ack(payload: bytearray | list[int]) -> AckMessage:
     try:
         result_type = AckResultType(result_type_raw)
     except ValueError:
-        _LOGGER.debug("Unknown ack result_type %s in payload: %s", result_type_raw, payload)
+        _LOGGER.debug(
+            "Unknown ack result_type %s in payload: %s", result_type_raw, payload
+        )
         result_type = AckResultType.UNKNOWN
     return AckMessage(
         ack_id=ack_id,
