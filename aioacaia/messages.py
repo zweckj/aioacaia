@@ -69,8 +69,7 @@ class AckMessage:
     """A bare command acknowledgement or keep-alive from the scale.
 
     Sent standalone as a heartbeat reply, or piggybacked inside a weight,
-    timer or button record chain (in which case it is currently skipped
-    rather than surfaced as its own message).
+    timer or button record chain.
     """
 
     ack_id: int
