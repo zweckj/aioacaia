@@ -61,10 +61,10 @@ from aioacaia.messages import (
 # imported on purpose so this harness stays byte-for-byte in sync with the exact
 # record widths and button map the PR #15 parser uses.
 from aioacaia.parser import (  # noqa: PLC2701
+    _ACK_TAG,
     _BATTERY_TAG,
     _BUTTON_TYPES,
     _RECORD_WIDTHS,
-    _UNKNOWN_TAG_0B,
     MessageType,
     decode,
     decode_time,
@@ -84,7 +84,7 @@ _TAG_NAMES: dict[int, str] = {
     int(MessageType.TIMER): "timer",
     int(MessageType.BUTTON): "button/key",
     _BATTERY_TAG: "battery",
-    _UNKNOWN_TAG_0B: "0x0b (unexplained)",
+    _ACK_TAG: "ack/keep-alive",
 }
 _BUTTON_NAMES: dict[int, str] = {
     code: bt.value for code, (bt, _tr) in _BUTTON_TYPES.items()

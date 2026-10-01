@@ -116,6 +116,15 @@ async def test_receive_invokes_notify_callback():
     callback.assert_called_once()
 
 
+async def test_bare_heartbeat_ack_does_not_invoke_notify_callback():
+    """A bare heartbeat ack carries no state change and stays silent."""
+    callback = Mock()
+    scale = _make_scale(notify_callback=callback)
+    await scale.on_bluetooth_data_received(None, bytearray(m.HEARTBEAT_BARE_ALIVE))
+
+    callback.assert_not_called()
+
+
 async def test_receive_ignores_non_header_short_message():
     """A short message without a header is ignored."""
     callback = Mock()

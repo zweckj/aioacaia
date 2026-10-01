@@ -34,6 +34,7 @@ from .exceptions import (
     AcaiaMessageTooShort,
 )
 from .messages import (
+    AckMessage,
     ButtonMessage,
     ButtonType,
     ScaleMessage,
@@ -477,6 +478,11 @@ class AcaiaScale:
     ) -> None:
         """Receive data from the scale and update state for each message."""
         for msg in self._extract_messages(data):
+            if isinstance(msg, AckMessage):
+                # A bare keep-alive carries no state change; new-style scales
+                # send one every second and consumers shouldn't be notified
+                # for it.
+                continue
             self._apply_message(msg)
             if self._notify_callback is not None:
                 self._notify_callback()
