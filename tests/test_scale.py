@@ -1,7 +1,9 @@
 """Tests for the main logic paths of aioacaia.scale."""
 
 import asyncio
+from collections.abc import Coroutine
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -20,6 +22,26 @@ _ADDRESS = "aa:bb:cc:dd:ee:ff"
 def _make_scale(**kwargs) -> AcaiaScale:
     """Create a scale bound to a dummy address."""
     return AcaiaScale(_ADDRESS, **kwargs)
+
+
+async def _next_command(scale: AcaiaScale) -> bytes:
+    """Return the payload of the next command the scale queues."""
+    char_id, payload = await asyncio.wait_for(scale._queue.get(), timeout=0.1)
+    assert char_id == scale._default_char_id
+    return payload
+
+
+async def _answer(
+    scale: AcaiaScale,
+    call: Coroutine[Any, Any, bool],
+    command: Command,
+    response: bytes,
+) -> bool:
+    """Run a command call, check what it queues and answer with ``response``."""
+    task = asyncio.create_task(call)
+    assert await _next_command(scale) == command
+    await scale.on_bluetooth_data_received(None, bytearray(response))
+    return await task
 
 
 def test_auth_command_is_instance_specific():
@@ -180,17 +202,6 @@ def test_flow_rate_skips_nonpositive_time_deltas():
     assert scale.flow_rate is None
 
 
-async def test_tare_enqueues_command():
-    """Taring enqueues the tare command."""
-    scale = _make_scale()
-    scale.connected = True
-    await scale.tare()
-
-    char_id, payload = scale._queue.get_nowait()
-    assert char_id == scale._default_char_id
-    assert payload == Command.TARE
-
-
 async def test_process_queue_acknowledges_failed_write():
     """A failed write does not leave the queue join counter blocked."""
     scale = _make_scale()
@@ -277,37 +288,95 @@ async def test_connect_preserves_device_not_found(monkeypatch):
         await scale.connect(setup_tasks=False)
 
 
-async def test_start_stop_timer_toggles_state():
-    """start_stop_timer toggles the running state and enqueues commands."""
+@pytest.mark.parametrize(
+    "response", [m.HEARTBEAT_TARE_DONE, m.BUTTON_TARE], ids=["ack", "button"]
+)
+async def test_tare_returns_true_when_scale_confirms(response):
+    """A tare succeeds once the scale acknowledges it or reports a tare."""
     scale = _make_scale()
     scale.connected = True
 
-    await scale.start_stop_timer()
+    assert await _answer(scale, scale.tare(), Command.TARE, response) is True
+
+
+async def test_timer_commands_return_true_when_scale_confirms():
+    """Confirmed timer commands succeed and update the timer like the scale.
+
+    The scale's responses to our own commands are not power-button presses, so
+    a confirmed start followed by a confirmed stop must not reset the timer.
+    """
+    scale = _make_scale()
+    scale.connected = True
+
+    start = scale.start_stop_timer()
+    assert await _answer(scale, start, Command.START_TIMER, m.BUTTON_START) is True
     assert scale.timer_running is True
-    assert scale._timer_start is not None
-    _, payload = scale._queue.get_nowait()
-    assert payload == Command.START_TIMER
 
-    await scale.start_stop_timer()
+    stop = scale.start_stop_timer()
+    assert await _answer(scale, stop, Command.STOP_TIMER, m.BUTTON_STOP) is True
     assert scale.timer_running is False
+    assert scale._timer_start is not None
     assert scale._timer_stop is not None
-    _, payload = scale._queue.get_nowait()
-    assert payload == Command.STOP_TIMER
 
-
-async def test_reset_timer_clears_state_and_enqueues():
-    """Resetting the timer clears state and enqueues the reset command."""
-    scale = _make_scale()
-    scale.connected = True
-    scale._timer_start = 100.0
-    scale._timer_stop = 200.0
-
-    await scale.reset_timer()
-
+    reset = scale.reset_timer()
+    assert await _answer(scale, reset, Command.RESET_TIMER, m.BUTTON_RESET) is True
     assert scale._timer_start is None
     assert scale._timer_stop is None
-    _, payload = scale._queue.get_nowait()
-    assert payload == Command.RESET_TIMER
+
+
+async def test_reset_running_timer_confirms_reset_and_restart():
+    """Resetting a running timer also waits for the restart to be confirmed."""
+    scale = _make_scale()
+    scale.connected = True
+    scale.timer_running = True
+    task = asyncio.create_task(scale.reset_timer())
+
+    assert await _next_command(scale) == Command.RESET_TIMER
+    await scale.on_bluetooth_data_received(None, bytearray(m.BUTTON_RESET))
+    assert await _next_command(scale) == Command.START_TIMER
+    await scale.on_bluetooth_data_received(None, bytearray(m.BUTTON_START))
+
+    assert await task is True
+    assert scale.timer_running is True
+
+
+async def test_command_ignores_unrelated_scale_events():
+    """Events confirming other commands leave the awaited command pending."""
+    scale = _make_scale()
+    scale.connected = True
+    task = asyncio.create_task(scale.start_stop_timer())
+    assert await _next_command(scale) == Command.START_TIMER
+
+    await scale.on_bluetooth_data_received(None, bytearray(m.BUTTON_RESET))
+    await scale.on_bluetooth_data_received(None, bytearray(m.HEARTBEAT_TARE_DONE))
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    await scale.on_bluetooth_data_received(None, bytearray(m.BUTTON_START))
+    assert await task is True
+
+
+@pytest.mark.parametrize("method", ["tare", "start_stop_timer", "reset_timer"])
+async def test_command_returns_false_without_confirmation(monkeypatch, method):
+    """A command the scale never confirms reports failure after the timeout."""
+    monkeypatch.setattr(scale_module, "_COMMAND_CONFIRMATION_TIMEOUT", 0.01)
+    scale = _make_scale()
+    scale.connected = True
+
+    assert await getattr(scale, method)() is False
+
+
+@pytest.mark.parametrize("method", ["tare", "start_stop_timer", "reset_timer"])
+async def test_disconnect_fails_command_awaiting_confirmation(method):
+    """A disconnect resolves a command awaiting confirmation as failed."""
+    scale = _make_scale()
+    scale.connected = True
+    task = asyncio.create_task(getattr(scale, method)())
+    await _next_command(scale)
+
+    scale.device_disconnected_handler()
+
+    assert await asyncio.wait_for(task, timeout=0.1) is False
 
 
 def test_device_disconnected_handler_resets_state():

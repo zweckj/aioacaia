@@ -35,6 +35,8 @@ from .exceptions import (
 )
 from .messages import (
     AckMessage,
+    AckResultCode,
+    AckResultType,
     ButtonMessage,
     ButtonType,
     ScaleMessage,
@@ -50,6 +52,29 @@ _HEADER = bytes((HEADER1, HEADER2))
 
 # time to wait after a disconnect before attempting to reconnect, in seconds
 _RECONNECT_DELAY: float = 15.0
+
+# time to wait for the scale to confirm a command, in seconds
+_COMMAND_CONFIRMATION_TIMEOUT: float = 2.0
+
+# the scale event that confirms each command was executed
+_COMMAND_CONFIRMATIONS: dict[Command, ButtonType] = {
+    Command.TARE: ButtonType.TARE,
+    Command.START_TIMER: ButtonType.START,
+    Command.STOP_TIMER: ButtonType.STOP,
+    Command.RESET_TIMER: ButtonType.RESET,
+}
+
+
+def _reported_event(msg: ScaleMessage | Settings | None) -> ButtonType | None:
+    """Return the tare or timer event a scale message reports, if any."""
+    match msg:
+        case AckMessage(
+            result_type=AckResultType.CMD, result_value=AckResultCode.TARE_DONE
+        ):
+            return ButtonType.TARE
+        case ButtonMessage(button=button):
+            return button
+    return None
 
 
 @dataclass(kw_only=True, slots=True)
@@ -112,6 +137,10 @@ class AcaiaScale:
         # queue
         self._queue: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue(maxsize=100)
         self._add_to_queue_lock = asyncio.Lock()
+        self._command_lock = asyncio.Lock()
+        self._pending_confirmation: tuple[ButtonType, asyncio.Future[bool]] | None = (
+            None
+        )
 
         self._last_short_msg: bytearray | None = None
 
@@ -219,7 +248,11 @@ class AcaiaScale:
         self._timestamp_last_command = time.time()
 
     def _drain_queue(self) -> None:
-        """Discard and acknowledge all queued commands."""
+        """Discard queued commands and fail any command awaiting confirmation."""
+        if self._pending_confirmation is not None:
+            _, confirmation = self._pending_confirmation
+            if not confirmation.done():
+                confirmation.set_result(False)
         while True:
             try:
                 self._queue.get_nowait()
@@ -441,35 +474,48 @@ class AcaiaScale:
         else:
             self._timer_start = time.monotonic()
 
-    async def tare(self) -> None:
-        """Tare the scale."""
+    async def tare(self) -> bool:
+        """Tare the scale, returning whether the scale confirmed it."""
         await self._ensure_connected()
-        await self._enqueue_command(Command.TARE)
+        async with self._command_lock:
+            return await self._send_and_confirm(Command.TARE)
 
-    async def start_stop_timer(self) -> None:
-        """Start/Stop the timer."""
+    async def start_stop_timer(self) -> bool:
+        """Start or stop the timer, returning whether the scale confirmed it."""
         await self._ensure_connected()
+        async with self._command_lock:
+            if self.timer_running:
+                return await self._send_and_confirm(Command.STOP_TIMER)
+            return await self._send_and_confirm(Command.START_TIMER)
 
-        if not self.timer_running:
-            _LOGGER.debug('Sending "start" message.')
-            await self._enqueue_command(Command.START_TIMER)
-            self._start_timer()
-        else:
-            _LOGGER.debug('Sending "stop" message.')
-            await self._enqueue_command(Command.STOP_TIMER)
-            self.timer_running = False
-            self._timer_stop = time.monotonic()
+    async def reset_timer(self) -> bool:
+        """Reset the timer, returning whether the scale confirmed it.
 
-    async def reset_timer(self) -> None:
-        """Reset the timer."""
+        A running timer is restarted, which the scale must confirm as well.
+        """
         await self._ensure_connected()
-        await self._enqueue_command(Command.RESET_TIMER)
-        self._timer_start = None
-        self._timer_stop = None
+        async with self._command_lock:
+            restart = self.timer_running
+            if not await self._send_and_confirm(Command.RESET_TIMER):
+                return False
+            return not restart or await self._send_and_confirm(Command.START_TIMER)
 
-        if self.timer_running:
-            await self._enqueue_command(Command.START_TIMER)
-            self._timer_start = time.monotonic()
+    async def _send_and_confirm(self, command: Command) -> bool:
+        """Send a command and wait for the scale to confirm it.
+
+        Callers must hold the command lock: only one command can await
+        confirmation at a time.
+        """
+        _LOGGER.debug("Sending %s command", command.name)
+        confirmation: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._pending_confirmation = (_COMMAND_CONFIRMATIONS[command], confirmation)
+        try:
+            await self._enqueue_command(command)
+            return await asyncio.wait_for(confirmation, _COMMAND_CONFIRMATION_TIMEOUT)
+        except TimeoutError:
+            return False
+        finally:
+            self._pending_confirmation = None
 
     async def on_bluetooth_data_received(
         self,
@@ -478,14 +524,29 @@ class AcaiaScale:
     ) -> None:
         """Receive data from the scale and update state for each message."""
         for msg in self._extract_messages(data):
+            is_command_response = self._confirm_pending_command(msg)
             if isinstance(msg, AckMessage):
                 # A bare keep-alive carries no state change; new-style scales
                 # send one every second and consumers shouldn't be notified
                 # for it.
                 continue
-            self._apply_message(msg)
+            self._apply_message(msg, is_command_response=is_command_response)
             if self._notify_callback is not None:
                 self._notify_callback()
+
+    def _confirm_pending_command(self, msg: ScaleMessage | Settings | None) -> bool:
+        """Confirm the awaited command if the message reports its event.
+
+        Returns whether the message is the scale's response to that command.
+        """
+        if self._pending_confirmation is None:
+            return False
+        expected, confirmation = self._pending_confirmation
+        if _reported_event(msg) is not expected:
+            return False
+        if not confirmation.done():
+            confirmation.set_result(True)
+        return True
 
     def _extract_messages(
         self, data: bytearray
@@ -544,7 +605,12 @@ class AcaiaScale:
         _LOGGER.debug("Discarding incomplete frame before next header")
         return pending[next_start:]
 
-    def _apply_message(self, msg: ScaleMessage | Settings | None) -> None:
+    def _apply_message(
+        self,
+        msg: ScaleMessage | Settings | None,
+        *,
+        is_command_response: bool = False,
+    ) -> None:
         """Update scale state from a single decoded message."""
         match msg:
             case Settings():
@@ -562,7 +628,12 @@ class AcaiaScale:
             case ButtonMessage():
                 if msg.weight is not None:
                     self._update_weight(msg.weight)
-                self._handle_button(msg.button, msg.timer_running, msg.time)
+                self._handle_button(
+                    msg.button,
+                    msg.timer_running,
+                    msg.time,
+                    is_command_response=is_command_response,
+                )
 
     def _update_weight(self, weight: float | None) -> None:
         """Store the latest weight and update the flow-rate history."""
@@ -597,6 +668,8 @@ class AcaiaScale:
         button: ButtonType,
         timer_running: bool | None,
         elapsed_time: float | None,
+        *,
+        is_command_response: bool = False,
     ) -> None:
         """Update the timer state from a physical button press."""
 
@@ -609,6 +682,8 @@ class AcaiaScale:
 
         def reset_on_power_button() -> None:
             """Pressing the power button two consecutive times resets the timer."""
+            if is_command_response:
+                return  # the scale echoing our own command is not a press
             if self._button_pressed:
                 reset()
             else:

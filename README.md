@@ -24,15 +24,23 @@ async def main() -> None:
     await scale.connect()
 
     try:
-        await scale.tare()
-        await scale.start_stop_timer()
-        await scale.reset_timer()
+        if not await scale.tare():
+            raise RuntimeError("Scale did not confirm tare")
+        if not await scale.start_stop_timer():
+            raise RuntimeError("Scale did not confirm timer start")
+        if not await scale.reset_timer():
+            raise RuntimeError("Scale did not confirm timer reset")
     finally:
         await scale.disconnect()
 
 
 asyncio.run(main())
 ```
+
+`tare()`, `start_stop_timer()`, and `reset_timer()` return `True` once the scale
+confirms the command, and `False` if no confirmation arrives within two seconds
+or the connection drops. Resetting a running timer also waits for the restart to
+be confirmed.
 
 ## State Updates
 

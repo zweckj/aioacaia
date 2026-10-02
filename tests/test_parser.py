@@ -77,6 +77,16 @@ def test_decode_heartbeat_bare_ack():
     )
 
 
+def test_decode_heartbeat_tare_ack():
+    """A tare completion reply decodes to its command acknowledgement."""
+    msg = _decode_message(m.HEARTBEAT_TARE_DONE)
+    assert msg == AckMessage(
+        ack_id=0,
+        result_type=AckResultType.CMD,
+        result_value=AckResultCode.TARE_DONE,
+    )
+
+
 def test_decode_heartbeat_weight():
     """A heartbeat wrapping a weight decodes to a WeightMessage."""
     msg = _decode_message(m.HEARTBEAT_WEIGHT)

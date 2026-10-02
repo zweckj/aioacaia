@@ -556,15 +556,18 @@ or 'q' to stop.
 async def _run_command(scale: AcaiaScale, log: logging.Logger, cmd: str) -> None:
     try:
         if cmd == "tare":
-            await scale.tare()
+            confirmed = await scale.tare()
         elif cmd in ("timer", "start", "stop", "toggle"):
-            await scale.start_stop_timer()
+            confirmed = await scale.start_stop_timer()
         elif cmd == "reset":
-            await scale.reset_timer()
+            confirmed = await scale.reset_timer()
         else:
             log.info("Unknown command '!%s' (try !tare, !timer, !reset)", cmd)
             return
-        log.info(">> sent command: !%s", cmd)
+        if confirmed:
+            log.info(">> scale confirmed command: !%s", cmd)
+        else:
+            log.warning(">> scale did not confirm command: !%s", cmd)
     except Exception as ex:  # noqa: BLE001 - diagnostic tool, surface anything
         log.warning("command !%s failed: %s", cmd, ex)
 
