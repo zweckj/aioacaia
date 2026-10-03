@@ -40,6 +40,12 @@ Pass a no-argument callback to receive notification when the scale state changes
 The latest values are available through `weight`, `timer`, `flow_rate`, and
 `device_state`.
 
+`timer` and `timer_running` follow the scale's own timer: scales that report
+their timer with each weight reading keep `timer` in sync, and new-style (2021+)
+scales also report whether the timer is running with each settings update. This
+keeps both correct when the timer is started or stopped on the scale itself, or
+was already running when you connected.
+
 ```python
 import asyncio
 

@@ -22,6 +22,14 @@ def _make_scale(**kwargs) -> AcaiaScale:
     return AcaiaScale(_ADDRESS, **kwargs)
 
 
+@pytest.fixture
+def clock(monkeypatch):
+    """Control the monotonic clock the scale reads."""
+    now = SimpleNamespace(value=1000.0)
+    monkeypatch.setattr("aioacaia.scale.time.monotonic", lambda: now.value)
+    return now
+
+
 def test_auth_command_is_instance_specific():
     """Each scale selects the auth command matching its generation."""
     new_style_scale = _make_scale(is_new_style_scale=True)
@@ -105,6 +113,91 @@ async def test_receive_reset_button_clears_timer():
     assert scale.timer_running is False
     assert scale._timer_start is None
     assert scale._timer_stop is None
+
+
+async def test_weight_timer_record_anchors_timer(clock):
+    """The scale's timer reported with each weight sets the local timer."""
+    scale = _make_scale()
+
+    await scale.on_bluetooth_data_received(
+        None, bytearray(m.REAL_2021_WEIGHT_TIMER_RUNNING)
+    )
+    assert scale.timer == 8
+
+    clock.value += 5
+    assert scale.timer == 8
+
+
+async def test_timer_running_on_scale_is_followed(clock):
+    """A timer the scale reports running is picked up, e.g. after reconnecting."""
+    scale = _make_scale()
+
+    await scale.on_bluetooth_data_received(
+        None, bytearray(m.REAL_2021_SETTINGS_TIMER_RUNNING)
+    )
+    await scale.on_bluetooth_data_received(
+        None, bytearray(m.REAL_2021_WEIGHT_TIMER_RUNNING)
+    )
+    assert scale.timer_running is True
+    clock.value += 2
+    assert scale.timer == 10
+
+    await scale.on_bluetooth_data_received(
+        None, bytearray(m.REAL_2021_SETTINGS_TIMER_STOPPED)
+    )
+    assert scale.timer_running is False
+    clock.value += 5
+    assert scale.timer == 10
+
+
+async def test_timer_state_in_flight_does_not_undo_command(clock):
+    """Frames sent before the scale ran a timer command are ignored until it settles."""
+    scale = _make_scale()
+    scale.connected = True
+
+    await scale.start_stop_timer()
+    await scale.on_bluetooth_data_received(
+        None, bytearray(m.REAL_2021_SETTINGS_TIMER_STOPPED)
+    )
+    await scale.on_bluetooth_data_received(
+        None, bytearray(m.REAL_2021_WEIGHT_TIMER_RUNNING)
+    )
+    assert scale.timer_running is True
+    assert scale.timer == 0
+
+    # Still stopped once the command had time to land: the scale ignored it.
+    clock.value += scale_module._TIMER_COMMAND_SETTLE_TIME
+    await scale.on_bluetooth_data_received(
+        None, bytearray(m.REAL_2021_SETTINGS_TIMER_STOPPED)
+    )
+    assert scale.timer_running is False
+
+
+async def test_timer_reset_is_not_undone_by_timer_in_flight(clock):
+    """A timer value sent before the scale ran a reset does not restore it."""
+    scale = _make_scale()
+    scale.connected = True
+    await scale.on_bluetooth_data_received(
+        None, bytearray(m.REAL_2021_WEIGHT_TIMER_RUNNING)
+    )
+
+    await scale.reset_timer()
+    await scale.on_bluetooth_data_received(
+        None, bytearray(m.REAL_2021_WEIGHT_TIMER_RUNNING)
+    )
+
+    assert scale.timer == 0
+
+
+async def test_old_style_scale_keeps_local_timer_running_state():
+    """Older scales do not take the timer's running state from their settings."""
+    scale = _make_scale(is_new_style_scale=False)
+
+    await scale.on_bluetooth_data_received(
+        None, bytearray(m.REAL_2021_SETTINGS_TIMER_RUNNING)
+    )
+
+    assert scale.timer_running is False
 
 
 async def test_receive_invokes_notify_callback():

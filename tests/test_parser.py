@@ -60,6 +60,23 @@ def test_decode_weight_invalid_unit_raises():
         decode(bytearray(m.WEIGHT_BAD_UNIT))
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected_weight", "expected_time"),
+    [
+        (m.WEIGHT, 175.9, 0.2),
+        (m.REAL_2021_WEIGHT_TIMER_RUNNING, 0.0, 8.1),
+        (m.WEIGHT_NEGATIVE, -175.9, None),
+        (m.WEIGHT_TRUNCATED_TIMER, 175.9, None),
+    ],
+)
+def test_decode_weight_reports_scale_timer(raw, expected_weight, expected_time):
+    """A timer record trailing a weight decodes as the scale's timer."""
+    msg = _decode_message(raw)
+    assert isinstance(msg, WeightMessage)
+    _assert_close(msg.weight, expected_weight)
+    _assert_close(msg.time, expected_time)
+
+
 def test_decode_timer():
     """Timer messages decode to seconds."""
     msg = _decode_message(m.TIMER)
@@ -96,6 +113,7 @@ def test_decode_heartbeat_uses_first_record():
     msg = _decode_message(m.HEARTBEAT_WEIGHT_THEN_TIME)
     assert isinstance(msg, WeightMessage)
     assert msg.weight == pytest.approx(175.9)
+    assert msg.time == pytest.approx(90.5)
 
 
 @pytest.mark.parametrize(
@@ -159,6 +177,21 @@ def test_decode_settings(raw, units):
     assert settings.battery == 93
     assert settings.auto_off == 5
     assert settings.beep_on is True
+
+
+@pytest.mark.parametrize(
+    ("raw", "timer_running"),
+    [
+        (m.REAL_2021_SETTINGS_TIMER_STOPPED, False),
+        (m.REAL_2021_SETTINGS_TIMER_RUNNING, True),
+    ],
+)
+def test_decode_settings_timer_running(raw, timer_running):
+    """The top bit of the battery byte reports the timer, not the battery."""
+    settings = _decode_message(raw)
+    assert isinstance(settings, Settings)
+    assert settings.battery == 74
+    assert settings.timer_running is timer_running
 
 
 def test_decode_too_short_raises():

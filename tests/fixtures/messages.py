@@ -32,6 +32,12 @@ WEIGHT_UNIT_10000 = frame(5, bytes([0xDF, 0x06, 0x00, 0x00, 0x04, 0x00]))  # -> 
 WEIGHT_BAD_UNIT = frame(
     5, bytes([0xDF, 0x06, 0x00, 0x00, 0x00, 0x00])
 )  # unit 0 -> ValueError
+# Verbatim capture from a 2021+ LUNAR: like WEIGHT (idling at 0.2 s), its
+# weight readings end in a timer record carrying the scale's own timer.
+REAL_2021_WEIGHT_TIMER_RUNNING = bytes.fromhex(
+    "efdd0c0c05000000000100070008011c06"
+)  # 0 g, timer at 8.1 s
+WEIGHT_TRUNCATED_TIMER = frame(5, _WEIGHT + bytes([0x07, 0x00]))  # record cut short
 
 # --- Timer (msg_type 7) ---
 TIMER = frame(7, _TIME)  # -> 90.5
@@ -42,7 +48,8 @@ HEARTBEAT_BARE_ALIVE = frame(11, bytes([0x00, 0xE0]))  # ack_id 0, alive_success
 HEARTBEAT_WEIGHT = frame(11, bytes([0x00, 0x00, 0x05]) + _WEIGHT)  # value 175.9
 HEARTBEAT_TIME = frame(11, bytes([0x00, 0x00, 0x07]) + _TIME)  # time 90.5
 # First wrapped record is a weight, followed by a timer record. The wrapper is
-# the first record, so this must decode to the weight, not the trailing timer.
+# the first record, so this must decode to the weight (carrying the trailing
+# timer as its time), not to a timer message.
 HEARTBEAT_WEIGHT_THEN_TIME = frame(
     11, bytes([0x00, 0x00, 0x05]) + _WEIGHT + bytes([0x07]) + _TIME
 )
@@ -100,6 +107,10 @@ UNKNOWN_TYPE = frame(99, bytes([0, 0]))
 SETTINGS_GRAMS = bytes.fromhex("efdd08095d020201000101000d60")
 # Same message with the units byte flipped to ounces (0x05).
 SETTINGS_OUNCES = _frame(0x08, bytes.fromhex("5d05020100010100"))
+# Verbatim captures from a 2021+ LUNAR at 74 % battery. The top bit of the
+# battery byte reports whether the timer is running (0x4a stopped, 0xca running).
+REAL_2021_SETTINGS_TIMER_STOPPED = bytes.fromhex("efdd08094a020101000101010e4c")
+REAL_2021_SETTINGS_TIMER_RUNNING = bytes.fromhex("efdd0809ca020101000101010ecc")
 
 # --- decode() framing edge cases ---
 HEADER_ONLY = bytes.fromhex("efdd0c")  # too short; also split part 1

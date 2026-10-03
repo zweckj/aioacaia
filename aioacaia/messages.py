@@ -16,9 +16,14 @@ class ButtonType(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class WeightMessage:
-    """A weight reading from the scale."""
+    """A weight reading from the scale.
+
+    ``time`` is the scale's own timer value, which 2021+ scales append to every
+    weight reading, or None when the reading carries no timer.
+    """
 
     weight: float
+    time: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,3 +93,4 @@ class Settings:
     units: str
     auto_off: int
     beep_on: bool
+    timer_running: bool = False
