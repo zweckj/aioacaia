@@ -51,6 +51,11 @@ _HEADER = bytes((HEADER1, HEADER2))
 # time to wait after a disconnect before attempting to reconnect, in seconds
 _RECONNECT_DELAY: float = 15.0
 
+# time after sending a timer command during which the timer state reported by
+# the scale is ignored, in seconds: frames already in flight still describe the
+# state from before the command
+_TIMER_COMMAND_SETTLE_TIME: float = 1.5
+
 
 @dataclass(kw_only=True, slots=True)
 class AcaiaDeviceState:
@@ -95,6 +100,7 @@ class AcaiaScale:
         self._timer_start: float | None = None
         self._timer_stop: float | None = None
         self._button_pressed = False
+        self._last_timer_command: float | None = None
 
         # connection diagnostics
         self.connected = False
@@ -459,6 +465,7 @@ class AcaiaScale:
             await self._enqueue_command(Command.STOP_TIMER)
             self.timer_running = False
             self._timer_stop = time.monotonic()
+        self._last_timer_command = time.monotonic()
 
     async def reset_timer(self) -> None:
         """Reset the timer."""
@@ -470,6 +477,7 @@ class AcaiaScale:
         if self.timer_running:
             await self._enqueue_command(Command.START_TIMER)
             self._timer_start = time.monotonic()
+        self._last_timer_command = time.monotonic()
 
     async def on_bluetooth_data_received(
         self,
@@ -555,8 +563,14 @@ class AcaiaScale:
                     auto_off_time=msg.auto_off,
                 )
                 _LOGGER.debug("Got battery level %s, units %s", msg.battery, msg.units)
+                # Only verified on new-style scales, so older ones keep
+                # tracking the timer locally.
+                if self._is_new_style_scale and self._scale_timer_state_is_current():
+                    self._sync_timer_running(msg.timer_running)
             case WeightMessage():
                 self._update_weight(msg.weight)
+                if msg.time is not None and self._scale_timer_state_is_current():
+                    self._update_timer(msg.time)
             case TimerMessage():
                 self._update_timer(msg.time)
             case ButtonMessage():
@@ -591,6 +605,23 @@ class AcaiaScale:
         now = time.monotonic()
         self._timer_start = now - elapsed_time
         self._timer_stop = None if self.timer_running else now
+
+    def _scale_timer_state_is_current(self) -> bool:
+        """Whether timer state reported by the scale reflects our last command."""
+        return (
+            self._last_timer_command is None
+            or time.monotonic() - self._last_timer_command >= _TIMER_COMMAND_SETTLE_TIME
+        )
+
+    def _sync_timer_running(self, running: bool) -> None:
+        """Follow the running state the scale reports for its timer."""
+        if running == self.timer_running:
+            return
+        if running:
+            self._start_timer()
+        else:
+            self.timer_running = False
+            self._timer_stop = time.monotonic()
 
     def _handle_button(
         self,

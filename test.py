@@ -110,13 +110,16 @@ def _summarize(msg: object) -> str:
             parts.append(f"weight={msg.weight:g}g")
         return " ".join(parts)
     if isinstance(msg, WeightMessage):
-        return f"weight={msg.weight:g}g"
+        if msg.time is None:
+            return f"weight={msg.weight:g}g"
+        return f"weight={msg.weight:g}g time={msg.time:g}s"
     if isinstance(msg, TimerMessage):
         return f"time={msg.time:g}s"
     if isinstance(msg, Settings):
         return (
             f"battery={msg.battery}% units={msg.units} "
-            f"auto_off={msg.auto_off} beep={msg.beep_on}"
+            f"auto_off={msg.auto_off} beep={msg.beep_on} "
+            f"timer_running={msg.timer_running}"
         )
     return repr(msg)
 
