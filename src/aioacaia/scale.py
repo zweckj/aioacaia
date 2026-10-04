@@ -466,6 +466,8 @@ class AcaiaScale:
             self.timer_running = False
             self._timer_stop = time.monotonic()
         self._last_timer_command = time.monotonic()
+        if self._notify_callback is not None:
+            self._notify_callback()
 
     async def reset_timer(self) -> None:
         """Reset the timer."""
@@ -478,6 +480,8 @@ class AcaiaScale:
             await self._enqueue_command(Command.START_TIMER)
             self._timer_start = time.monotonic()
         self._last_timer_command = time.monotonic()
+        if self._notify_callback is not None:
+            self._notify_callback()
 
     async def on_bluetooth_data_received(
         self,

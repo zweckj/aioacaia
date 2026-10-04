@@ -209,6 +209,35 @@ async def test_receive_invokes_notify_callback():
     callback.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(m.TIMER, id="timer"),
+        pytest.param(m.HEARTBEAT_TIME, id="heartbeat_timer"),
+        pytest.param(m.REAL_2021_WEIGHT_TIMER_RUNNING, id="weight_with_timer"),
+        pytest.param(m.REAL_2021_SETTINGS_TIMER_RUNNING, id="settings_running"),
+        pytest.param(m.BUTTON_START, id="start_button"),
+        pytest.param(m.REAL_HEARTBEAT_WRAPPED_START, id="heartbeat_start_button"),
+        pytest.param(m.BUTTON_STOP_TIME, id="stop_button"),
+        pytest.param(m.BUTTON_RESET, id="reset_button"),
+    ],
+)
+async def test_timer_change_from_scale_invokes_notify_callback(raw: bytes) -> None:
+    """Every message that changes the timer notifies listeners."""
+    callback = Mock()
+    scale = _make_scale(notify_callback=callback)
+    # The scale reports a stopped timer at 42 s, which each message changes.
+    stopped_at_42s = m.frame(7, bytes([0, 42, 0]))
+    await scale.on_bluetooth_data_received(Mock(), bytearray(stopped_at_42s))
+    callback.reset_mock()
+    before = (scale.timer_running, scale.timer)
+
+    await scale.on_bluetooth_data_received(Mock(), bytearray(raw))
+
+    assert (scale.timer_running, scale.timer) != before
+    callback.assert_called_once()
+
+
 async def test_bare_heartbeat_ack_does_not_invoke_notify_callback():
     """A bare heartbeat ack carries no state change and stays silent."""
     callback = Mock()
@@ -401,6 +430,24 @@ async def test_reset_timer_clears_state_and_enqueues():
     assert scale._timer_stop is None
     _, payload = scale._queue.get_nowait()
     assert payload == Command.RESET_TIMER
+
+
+async def test_timer_commands_invoke_notify_callback(clock: SimpleNamespace) -> None:
+    """Each timer command notifies once, after the timer has been updated."""
+    callback = Mock()
+    scale = _make_scale(notify_callback=callback)
+    scale.connected = True
+    seen: list[tuple[bool, int]] = []
+    callback.side_effect = lambda: seen.append((scale.timer_running, scale.timer))
+
+    await scale.start_stop_timer()
+    clock.value += 5
+    await scale.reset_timer()  # while running: resets and restarts
+    clock.value += 3
+    await scale.start_stop_timer()
+    await scale.reset_timer()  # while stopped
+
+    assert seen == [(True, 0), (True, 0), (False, 3), (False, 0)]
 
 
 def test_device_disconnected_handler_resets_state():
