@@ -91,10 +91,11 @@ def decode_time(time_payload: bytearray | list[int]) -> float:
 
 # Record tags and the fixed width of each record's body. Everything the scale
 # reports in an event payload is a chain of [tag][body] records running to the
-# end of the frame, so the same walk decodes a button's attached fields and a
-# heartbeat's wrapped payload. The ack tag's body is decoded by _parse_ack when
-# it heads the chain (see _parse_heartbeat); mid-chain it is only skipped, its
-# width still has to be right or the rest of the chain is lost behind it.
+# end of the frame, so the same walk decodes a button's attached fields, a
+# heartbeat's wrapped payload and the timer record trailing a weight. The ack
+# tag's body is decoded by _parse_ack when it heads the chain (see
+# _parse_heartbeat); mid-chain it is only skipped, its width still has to be
+# right or the rest of the chain is lost behind it.
 _RECORD_WIDTHS: Final[dict[int, int]] = {
     MessageType.WEIGHT: 6,
     _BATTERY_TAG: 1,
@@ -163,6 +164,13 @@ def _parse_button(payload: bytearray | list[int]) -> ButtonMessage:
     return ButtonMessage(button, timer_running, records.time, records.weight)
 
 
+def _parse_weight(payload: bytearray | list[int]) -> WeightMessage:
+    """Decode a weight payload and the scale timer record that may follow it."""
+    weight = decode_weight(payload)
+    trailing = _walk_records(payload[_RECORD_WIDTHS[MessageType.WEIGHT] :])
+    return WeightMessage(weight, trailing.time)
+
+
 def _parse_ack(payload: bytearray | list[int]) -> AckMessage:
     """Decode the 2-byte ack/keep-alive record at the start of a payload."""
     ack_id = payload[0]
@@ -201,27 +209,33 @@ def _parse_heartbeat(
     if inner_tag == MessageType.BUTTON:
         return _parse_button(payload[3:])
     if inner_tag == MessageType.WEIGHT:
-        return WeightMessage(decode_weight(payload[3:]))
+        return _parse_weight(payload[3:])
     if inner_tag == MessageType.TIMER:
         return TimerMessage(decode_time(payload[3:]))
     return ack
 
 
 def _parse_settings(payload: bytearray) -> Settings:
-    """Decode a settings payload."""
+    """Decode a settings payload.
+
+    The top bit of the battery byte reports whether the scale's timer is
+    running; the remaining bits are the battery level.
+    """
     _require_payload_length(payload, 7, "Settings")
     settings = Settings(
         battery=payload[1] & 0x7F,
         units="ounces" if payload[2] == 5 else "grams",
         auto_off=payload[4] * 5,
         beep_on=payload[6] == 1,
+        timer_running=bool(payload[1] & 0x80),
     )
     _LOGGER.debug(
-        "settings: battery=%s %s, auto_off=%s, beep=%s",
+        "settings: battery=%s %s, auto_off=%s, beep=%s, timer_running=%s",
         settings.battery,
         settings.units,
         settings.auto_off,
         settings.beep_on,
+        settings.timer_running,
     )
     return settings
 
@@ -233,7 +247,7 @@ def _parse_message(
     _LOGGER.debug("Message received: msg_type: %s, payload: %s", msg_type, payload)
     match msg_type:
         case MessageType.WEIGHT:
-            return WeightMessage(decode_weight(payload))
+            return _parse_weight(payload)
         case MessageType.TIMER:
             return TimerMessage(decode_time(payload))
         case MessageType.HEARTBEAT:

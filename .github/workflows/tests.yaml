@@ -34,12 +34,12 @@ jobs:
       - name: Lint
         if: matrix.python-version == '3.12'
         run: |
-          uv run --locked --extra dev ruff check aioacaia tests run.py
-          uv run --locked --extra dev ruff format --check aioacaia tests run.py
+          uv run --locked --extra dev ruff check src tests run.py
+          uv run --locked --extra dev ruff format --check src tests run.py
 
       - name: Type check
         if: matrix.python-version == '3.12'
-        run: uv run --locked --extra dev mypy aioacaia tests run.py test.py
+        run: uv run --locked --extra dev mypy src tests run.py test.py
 
       - name: Test
         run: uv run --locked --extra dev pytest -q
