@@ -57,15 +57,16 @@ async def is_new_scale(address_or_ble_device: str | BLEDevice) -> bool:
 
 def derive_model_name(name: str | None) -> str | None:
     """Derive the marketing model name from the advertised device name."""
-    if name is None:
-        return None
-    if name == "PROCHBT001":
-        return "Pearl"
-    if "-" not in name:
-        return None
-    prefix = name.split("-")[0]
-    if prefix in ("PEARL", "LUNAR", "PYXIS"):
-        return prefix.capitalize()
-    if prefix == "ACAIAL":
-        return "Lunar"
+    match name:
+        case None:
+            return None
+        case "PROCHBT001":
+            return "Pearl"
+        case _ if name.startswith("BARW270"):
+            return "Baratza Sette 270Wi"
+    match name.split("-", 1):
+        case ["PEARL" | "LUNAR" | "PYXIS" as prefix, _]:
+            return prefix.capitalize()
+        case ["ACAIAL", _]:
+            return "Lunar"
     return None
