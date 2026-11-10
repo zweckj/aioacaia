@@ -1,9 +1,10 @@
 """Tests for aioacaia.discovery."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+from bleak import BleakScanner
 
 from aioacaia.discovery import derive_model_name, scan
 
@@ -29,15 +30,14 @@ def test_derive_model_name(name: str | None, expected: str | None) -> None:
 
 async def test_scan_finds_baratza_sette() -> None:
     """The Sette 270Wi is picked up by discovery, unrelated devices are not."""
-    scanner = SimpleNamespace(
-        discover=AsyncMock(
-            return_value=[
-                SimpleNamespace(name="BARW27074A2", address="00:1C:97:17:74:A2"),
-                SimpleNamespace(name="LUNAR-123456", address="aa:bb:cc:dd:ee:ff"),
-                SimpleNamespace(name="Headphones", address="11:22:33:44:55:66"),
-                SimpleNamespace(name=None, address="77:88:99:aa:bb:cc"),
-            ]
-        )
+    scanner = Mock(spec=BleakScanner)
+    scanner.discover = AsyncMock(
+        return_value=[
+            SimpleNamespace(name="BARW27074A2", address="00:1C:97:17:74:A2"),
+            SimpleNamespace(name="LUNAR-123456", address="aa:bb:cc:dd:ee:ff"),
+            SimpleNamespace(name="Headphones", address="11:22:33:44:55:66"),
+            SimpleNamespace(name=None, address="77:88:99:aa:bb:cc"),
+        ]
     )
     assert await scan(scanner, timeout=1) == [
         "00:1C:97:17:74:A2",
